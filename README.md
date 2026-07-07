@@ -10,9 +10,10 @@ cargo run
 
 ## 功能
 
-- **多图查看**：支持 1-8 张图片同时显示
-- **自适应布局**：1-4 张单行均分，5-8 张双行排列
+- **多图查看**：1-8 张图片同时显示，自适应网格布局
+- **多种打开方式**：菜单栏 File → Open、从资源管理器拖拽图片到窗口
 - **并行加载**：图片解码在后台线程并行执行，不阻塞 UI
+- **局部模式**：按 `P` 进入，拖拽框选区域同步到所有图片，显示平均亮度
 
 ## 布局
 
@@ -26,23 +27,14 @@ cargo run
 
 ## 技术栈
 
-- **GUI**: eframe 0.35 + egui 0.35 (wgpu)
-- **图片**: `image` 0.25
-- **对话框**: `rfd` 0.17
+eframe 0.35 + egui 0.35 (wgpu) · `image` 0.25 · `rfd` 0.17
 
-## 项目结构
+## 文档
 
-```
-src/
-├── main.rs          # 入口
-├── app.rs           # 编排层
-├── state.rs         # 共享状态
-├── core/
-│   └── image.rs     # 图片解码
-└── ui/
-    ├── menu.rs      # 菜单栏
-    ├── viewer.rs    # 网格布局
-    └── widgets.rs   # 通用组件
-```
-
-详见 [`DOC.md`](DOC.md) 和 [`AGENTS.md`](AGENTS.md)。
+| 文档 | 内容 |
+|---|---|
+| [架构](docs/architecture.md) | 分层、数据流、模块职责 |
+| [布局引擎](docs/layout.md) | 网格算法、坐标计算、常量 |
+| [线程模型](docs/threading.md) | 加载管线、通信方式 |
+| [局部模式](docs/local-mode.md) | 选择框、归一化坐标、亮度计算 |
+| [egui 0.35 API](docs/egui-api.md) | 与旧版 API 差异备忘 |
