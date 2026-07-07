@@ -11,14 +11,16 @@ use crate::ui;
 pub struct MmCompare {
     state: AppState,
     pending_open: bool,
-    /// Receiver for background-decoded images (one per image).
+    /// Receiver for background-decoded images.
     load_rx: Option<mpsc::Receiver<Option<core::image::DecodedImage>>>,
-    /// Total number of images being loaded.
+    /// Number of images being loaded in the current batch.
     loading_total: usize,
     /// Number already received.
     loading_received: usize,
     /// Accumulated decoded images.
     loading_buf: Vec<core::image::DecodedImage>,
+    /// Whether to append loaded images (true) or replace (false).
+    loading_append: bool,
 }
 
 impl Default for MmCompare {
@@ -30,12 +32,17 @@ impl Default for MmCompare {
             loading_total: 0,
             loading_received: 0,
             loading_buf: Vec::new(),
+            loading_append: false,
         }
     }
 }
 
 impl MmCompare {
-    /// Open file dialog (blocking, main thread), then spawn one thread per image to decode in parallel.
+    fn is_loading(&self) -> bool {
+        self.load_rx.is_some()
+    }
+
+    /// File > Open: dialog (replace mode).
     fn start_open(&mut self, ctx: &egui::Context) {
         let paths: Vec<PathBuf> = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
@@ -47,9 +54,48 @@ impl MmCompare {
             return;
         }
 
+        self.spawn_loaders(paths, ctx, false);
+    }
+
+    /// Check for files dropped onto the window (append mode).
+    fn poll_drops(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+
+        let remaining = 8usize
+            .saturating_sub(self.state.images.len())
+            .saturating_sub(self.loading_total);
+
+        let paths: Vec<PathBuf> = dropped
+            .into_iter()
+            .filter_map(|f| f.path)
+            .filter(|p| {
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| {
+                        matches!(
+                            e.to_ascii_lowercase().as_str(),
+                            "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
+                        )
+                    })
+                    .unwrap_or(false)
+            })
+            .take(remaining)
+            .collect();
+
+        if !paths.is_empty() {
+            self.spawn_loaders(paths, ctx, true);
+        }
+    }
+
+    /// Spawn one thread per path to decode in parallel.
+    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context, append: bool) {
         self.loading_total = paths.len();
         self.loading_received = 0;
         self.loading_buf.clear();
+        self.loading_append = append;
         let (tx, rx) = mpsc::channel();
 
         for p in paths {
@@ -64,19 +110,17 @@ impl MmCompare {
                 tx.send(decoded).ok();
             });
         }
-        drop(tx); // so rx won't block after all senders are gone
+        drop(tx);
 
         self.load_rx = Some(rx);
         ctx.request_repaint();
     }
 
-    /// Poll for completed decodes and upload textures when all are done.
     fn poll_loading(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.load_rx else {
             return;
         };
 
-        // Drain all available messages
         while let Ok(decoded) = rx.try_recv() {
             if let Some(img) = decoded {
                 self.loading_buf.push(img);
@@ -106,7 +150,12 @@ impl MmCompare {
                 })
                 .collect();
 
-            self.state.set_images(images);
+            if self.loading_append {
+                self.state.append_images(images);
+            } else {
+                self.state.set_images(images);
+            }
+
             self.load_rx = None;
             self.loading_total = 0;
             self.loading_received = 0;
@@ -117,10 +166,16 @@ impl MmCompare {
 
 impl eframe::App for MmCompare {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // File > Open
         if self.pending_open {
             self.pending_open = false;
             let ctx = ui.ctx().clone();
             self.start_open(&ctx);
+        }
+
+        // Drag-and-drop (append mode, only when not already loading)
+        if !self.is_loading() {
+            self.poll_drops(ui.ctx());
         }
 
         self.poll_loading(ui.ctx());

@@ -23,10 +23,11 @@ src/
 ├── core/
 │   ├── mod.rs
 │   └── image.rs     # 图片解码（纯函数，线程安全）
-└── ui/
+├── ui/
     ├── mod.rs
     ├── menu.rs      # 菜单栏
-    ├── viewer.rs    # 多图网格布局
+    ├── viewer.rs    # 布局引擎：算位置 + 分隔线
+    ├── cell.rs      # 图片渲染：居中画图
     └── widgets.rs   # 通用组件（预留）
 ```
 
@@ -41,7 +42,11 @@ src/
 - **app.rs**: 薄编排层，串联 core → state → ui
 - **state.rs**: 纯数据结构，不含逻辑
 
-### 3. 布局：手动精确坐标
+### 3. 布局与渲染解耦
+- **viewer.rs**: 布局引擎，只负责计算 cell 位置、画分隔线、控制间距。不关心图片怎么画。
+- **cell.rs**: 渲染单元，只负责"给我一个图片+矩形，我居中画出来"。不关心自己在哪里。
+
+### 4. 手动精确坐标
 egui 的自动布局（`ui.horizontal`、`item_spacing`、`centered_and_justified`）在需要精确对齐时有各种 edge case。当前 `viewer.rs` 采用完全手动布局：`allocate_exact_size` 预留空间 → `Rect::from_min_size` 计算位置 → `ui.painter()` / `ui.put()` 精确绘制。
 
 ## 关键常量

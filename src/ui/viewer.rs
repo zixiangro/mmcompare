@@ -2,15 +2,20 @@ use eframe::egui;
 
 use crate::state::ImageInfo;
 
+use super::cell;
+
 /// Separator line thickness.
 const SEP: f32 = 1.0;
 /// Margin on each side of vertical separators, and from window edges.
 const MARGIN: f32 = 6.0;
 
-/// Layout 1-8 images in a grid.
-/// - 1-4 images: single row, equal width per image.
-/// - 5-8 images: two rows; first row gets ceil(n/2), second gets floor(n/2).
-/// All cells have the same area.
+/// Layout N images in a grid.
+///
+/// This function is purely a layout coordinator:
+/// - Decides row/column counts based on image count
+/// - Computes uniform cell sizes across all rows
+/// - Positions separators and margins
+/// - Delegates each cell's rendering to `cell::draw_image`
 pub fn image_grid(ui: &mut egui::Ui, images: &[ImageInfo], loading_count: usize) {
     if loading_count > 0 {
         ui.centered_and_justified(|ui| {
@@ -39,13 +44,11 @@ pub fn image_grid(ui: &mut egui::Ui, images: &[ImageInfo], loading_count: usize)
 
     let max_cols = *row_layout.iter().max().unwrap_or(&1) as f32;
     let rows = row_layout.len() as f32;
-    let inter_row = SEP;
-    let row_height = (available.y - (rows - 1.0) * inter_row) / rows;
+    let row_height = (available.y - (rows - 1.0) * SEP) / rows;
     let cell_width = (available.x - (max_cols - 1.0) * (MARGIN + SEP + MARGIN)) / max_cols;
 
     let mut offset = 0;
     for (row_idx, &col_count) in row_layout.iter().enumerate() {
-        // Inter-row gap + separator (skip for first row)
         if row_idx > 0 {
             // Horizontal separator between rows (no margin)
             let (_, sr) =
@@ -58,47 +61,23 @@ pub fn image_grid(ui: &mut egui::Ui, images: &[ImageInfo], loading_count: usize)
             ui.allocate_exact_size(egui::vec2(available.x, row_height), egui::Sense::hover());
         let row_rect = row_resp.rect;
 
-        // Center cells + separators within the row
-        let inter_cell = MARGIN + SEP + MARGIN; // 13px between cells
+        // Center cells within the row
+        let inter_cell = MARGIN + SEP + MARGIN;
         let row_content = col_count as f32 * cell_width + (col_count - 1) as f32 * inter_cell;
         let mut x = row_rect.left() + (available.x - row_content) / 2.0;
 
         let row_images = &images[offset..offset + col_count];
         for (i, img) in row_images.iter().enumerate() {
             if i > 0 {
-                // Margin left of separator
-                let mr = egui::Rect::from_min_size(
-                    egui::pos2(x, row_rect.top()),
-                    egui::vec2(MARGIN, row_height),
-                );
-                ui.allocate_rect(mr, egui::Sense::hover());
-                x += MARGIN;
-
-                // Separator
-                let sr = egui::Rect::from_min_size(
-                    egui::pos2(x, row_rect.top()),
-                    egui::vec2(SEP, row_height),
-                );
-                ui.painter().rect_filled(sr, 0.0, sep_color);
-                ui.allocate_rect(sr, egui::Sense::hover());
-                x += SEP;
-
-                // Margin right of separator
-                let mr = egui::Rect::from_min_size(
-                    egui::pos2(x, row_rect.top()),
-                    egui::vec2(MARGIN, row_height),
-                );
-                ui.allocate_rect(mr, egui::Sense::hover());
-                x += MARGIN;
+                x = draw_vertical_separator(ui, x, row_rect, sep_color);
             }
 
-            // Cell
-            let cr = egui::Rect::from_min_size(
+            let cell_rect = egui::Rect::from_min_size(
                 egui::pos2(x, row_rect.top()),
                 egui::vec2(cell_width, row_height),
             );
-            draw_cell(ui, img, cr);
-            ui.allocate_rect(cr, egui::Sense::hover());
+            cell::draw_image(ui, img, cell_rect);
+            ui.allocate_rect(cell_rect, egui::Sense::hover());
             x += cell_width;
         }
 
@@ -106,17 +85,39 @@ pub fn image_grid(ui: &mut egui::Ui, images: &[ImageInfo], loading_count: usize)
     }
 }
 
-fn draw_cell(ui: &mut egui::Ui, img: &ImageInfo, cell_rect: egui::Rect) {
-    let img_w = img.size[0] as f32;
-    let img_h = img.size[1] as f32;
-    let scale = (cell_rect.width() / img_w).min(cell_rect.height() / img_h);
-    let display = egui::vec2(img_w * scale, img_h * scale);
+/// Draw a vertical separator with margin on both sides. Returns the new x position after the separator.
+fn draw_vertical_separator(
+    ui: &mut egui::Ui,
+    x: f32,
+    row_rect: egui::Rect,
+    color: egui::Color32,
+) -> f32 {
+    let mut x = x;
 
-    let offset = (cell_rect.size() - display) / 2.0;
-    let img_rect = egui::Rect::from_min_size(cell_rect.min + offset, display);
-
-    ui.put(
-        img_rect,
-        egui::Image::from_texture(egui::load::SizedTexture::new(img.texture.id(), display)),
+    // Margin left
+    let mr = egui::Rect::from_min_size(
+        egui::pos2(x, row_rect.top()),
+        egui::vec2(MARGIN, row_rect.height()),
     );
+    ui.allocate_rect(mr, egui::Sense::hover());
+    x += MARGIN;
+
+    // Separator line
+    let sr = egui::Rect::from_min_size(
+        egui::pos2(x, row_rect.top()),
+        egui::vec2(SEP, row_rect.height()),
+    );
+    ui.painter().rect_filled(sr, 0.0, color);
+    ui.allocate_rect(sr, egui::Sense::hover());
+    x += SEP;
+
+    // Margin right
+    let mr = egui::Rect::from_min_size(
+        egui::pos2(x, row_rect.top()),
+        egui::vec2(MARGIN, row_rect.height()),
+    );
+    ui.allocate_rect(mr, egui::Sense::hover());
+    x += MARGIN;
+
+    x
 }

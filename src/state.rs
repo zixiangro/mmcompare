@@ -23,6 +23,10 @@ impl AppState {
         self.images = images;
     }
 
+    pub fn append_images(&mut self, images: Vec<ImageInfo>) {
+        self.images.extend(images);
+    }
+
     #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.images.clear();
