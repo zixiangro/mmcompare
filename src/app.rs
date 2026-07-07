@@ -11,15 +11,10 @@ use crate::ui;
 pub struct MmCompare {
     state: AppState,
     pending_open: bool,
-    /// Receiver for background-decoded images.
     load_rx: Option<mpsc::Receiver<Option<core::image::DecodedImage>>>,
-    /// Number of images being loaded in the current batch.
     loading_total: usize,
-    /// Number already received.
     loading_received: usize,
-    /// Accumulated decoded images.
     loading_buf: Vec<core::image::DecodedImage>,
-    /// Whether to append loaded images (true) or replace (false).
     loading_append: bool,
 }
 
@@ -42,7 +37,6 @@ impl MmCompare {
         self.load_rx.is_some()
     }
 
-    /// File > Open: dialog (replace mode).
     fn start_open(&mut self, ctx: &egui::Context) {
         let paths: Vec<PathBuf> = rfd::FileDialog::new()
             .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
@@ -57,7 +51,6 @@ impl MmCompare {
         self.spawn_loaders(paths, ctx, false);
     }
 
-    /// Check for files dropped onto the window (append mode).
     fn poll_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
@@ -90,7 +83,6 @@ impl MmCompare {
         }
     }
 
-    /// Spawn one thread per path to decode in parallel.
     fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context, append: bool) {
         self.loading_total = paths.len();
         self.loading_received = 0;
@@ -145,6 +137,7 @@ impl MmCompare {
                     ImageInfo {
                         texture,
                         size: d.size,
+                        rgba: d.rgba,
                         path: d.path,
                     }
                 })
@@ -166,14 +159,21 @@ impl MmCompare {
 
 impl eframe::App for MmCompare {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // File > Open
+        // Toggle local mode
+        if ui.input(|i| i.key_pressed(egui::Key::P)) {
+            self.state.local_mode = !self.state.local_mode;
+            if !self.state.local_mode {
+                self.state.selection = None;
+                self.state.avg_y.fill(None);
+            }
+        }
+
         if self.pending_open {
             self.pending_open = false;
             let ctx = ui.ctx().clone();
             self.start_open(&ctx);
         }
 
-        // Drag-and-drop (append mode, only when not already loading)
         if !self.is_loading() {
             self.poll_drops(ui.ctx());
         }
@@ -185,7 +185,7 @@ impl eframe::App for MmCompare {
         egui::CentralPanel::default().show(ui, |ui| {
             ui::viewer::image_grid(
                 ui,
-                &self.state.images,
+                &mut self.state,
                 self.loading_total - self.loading_received,
             );
         });
