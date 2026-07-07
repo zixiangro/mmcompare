@@ -10,7 +10,7 @@ const MARGIN: f32 = 6.0;
 
 pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize) {
     if loading_count > 0 {
-        ui.centered_and_justified(|ui| {
+        ui.vertical_centered(|ui| {
             ui.label(format!("Loading {} image(s)...", loading_count));
         });
         ui.ctx().request_repaint();
@@ -18,13 +18,15 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
     }
 
     if state.images.is_empty() {
-        let hint = if state.local_mode {
-            "No images loaded. Press P to exit local mode."
-        } else {
-            "No images loaded. Drag images here."
-        };
-        ui.centered_and_justified(|ui| {
-            ui.label(hint);
+        ui.vertical_centered(|ui| {
+            ui.add_space(ui.available_height() / 3.0);
+            ui.label(egui::RichText::new("MMCompare").size(24.0).strong());
+            ui.add_space(12.0);
+            ui.label("Drag images here to view  (max 8)");
+            ui.add_space(4.0);
+            ui.label("Press  P  to toggle local mode");
+            ui.add_space(12.0);
+            ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
         });
         return;
     }

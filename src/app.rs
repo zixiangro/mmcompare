@@ -145,6 +145,13 @@ impl eframe::App for MmCompare {
         // Toggle local mode
         if ui.input(|i| i.key_pressed(egui::Key::P)) {
             self.state.local_mode = !self.state.local_mode;
+            let title = if self.state.local_mode {
+                "MMCompare - Local Mode"
+            } else {
+                "MMCompare"
+            };
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(title.into()));
             if !self.state.local_mode {
                 self.state.selection = None;
                 self.state.avg_y.fill(None);
