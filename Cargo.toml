@@ -11,4 +11,3 @@ eframe = { version = "0.35", features = ["default"] }
 egui_extras = { version = "0.35", features = ["default", "image"] }
 env_logger = { version = "0.11.11", features = ["auto-color", "humantime"] }
 image = "0.25"
-rfd = "0.17"

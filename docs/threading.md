@@ -7,9 +7,10 @@
 ## 图片加载管线
 
 ```
-用户操作（File>Open 或 拖拽）
+用户拖拽文件到窗口
   │
-  ├─ 主线程：收集文件路径 (≤8)
+  ├─ 主线程：poll_drops() 取 ctx.input().raw.dropped_files
+  ├─ 主线程：过滤图片格式，限制 ≤8 张
   ├─ 主线程：每张图 spawn 一个子线程
   │    │
   │    ├─ 子线程 1：读文件 → decode_image_bytes() → tx.send()
@@ -43,11 +44,6 @@ std::thread::spawn(move || {
 - 每个子线程持有克隆的 `Sender`
 - `drop(tx)` 后 rx 在所有 sender 关闭时自然结束
 
-## 两种加载模式
+## 加载模式
 
-| 触发 | 方法 | append 参数 |
-|---|---|---|
-| File → Open | `start_open()` | `false` — 替换已有图片 |
-| 拖拽文件 | `poll_drops()` | `true` — 追加到末尾 |
-
-拖拽时检查 `8 - images.len() - loading_total` 剩余名额，超出的忽略。
+拖拽文件始终以 `append=true` 追加到已有图片末尾。检查 `8 - images.len() - loading_total` 剩余名额，超出的忽略。

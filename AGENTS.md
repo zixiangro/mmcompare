@@ -9,7 +9,6 @@
 
 - **GUI**: eframe 0.35 (wgpu 后端) + egui 0.35
 - **图片解码**: `image` crate 0.25
-- **文件对话框**: `rfd` 0.17
 - **日志**: env_logger
 - **线程**: 仅 `std::thread::spawn` + `std::sync::mpsc`
 
@@ -25,7 +24,6 @@ src/
 │   └── image.rs     # 图片解码（纯函数，线程安全）
 ├── ui/
     ├── mod.rs
-    ├── menu.rs      # 菜单栏
     ├── viewer.rs    # 布局引擎：算位置 + 分隔线
     ├── cell.rs      # 图片渲染：居中画图 + 选择覆盖层 + 亮度计算
     └── widgets.rs   # 通用组件（预留）
@@ -34,7 +32,7 @@ src/
 ## 架构原则
 
 ### 1. 单线程心智模型
-除了图片解码，全部在主线程运行。多线程代码**物理隔离**在 `app.rs` 的 `start_open`/`poll_drops`/`spawn_loaders`/`poll_loading` 方法中。子线程用完即弃，线程间仅通过 `mpsc::channel` 通信。无 `Arc<Mutex<>>`、无全局线程池。
+除了图片解码，全部在主线程运行。多线程代码**物理隔离**在 `app.rs` 的 `poll_drops`/`spawn_loaders`/`poll_loading` 方法中。子线程用完即弃，线程间仅通过 `mpsc::channel` 通信。无 `Arc<Mutex<>>`、无全局线程池。
 
 ### 2. 前后端分层
 - **ui/**: 只读取 state，渲染界面
@@ -47,7 +45,7 @@ src/
 - **cell.rs**: 渲染单元，只负责"给我一个图片+矩形，我居中画出来"。不关心自己在哪里。
 
 ### 4. 手动精确坐标
-egui 的自动布局（`ui.horizontal`、`item_spacing`、`centered_and_justified`）在需要精确对齐时有各种 edge case。当前 `viewer.rs` 采用完全手动布局：`allocate_exact_size` 预留空间 → `Rect::from_min_size` 计算位置 → `ui.painter()` / `ui.put()` 精确绘制。
+egui 的自动布局（`ui.horizontal`、`item_spacing`、`centered_and_justified`）在需要精确对齐时有各种 edge case。当前 `viewer.rs` 采用完全手动布局：`allocate_exact_size` 预留空间 → `pos2` 计算位置 → `ui.painter()` / `ui.interact()` 精确绘制。
 
 ## 关键常量
 
@@ -59,18 +57,20 @@ egui 的自动布局（`ui.horizontal`、`item_spacing`、`centered_and_justifie
 ## 图片加载流程
 
 ```
-用户点击 Open → 文件对话框(主线程,阻塞) → 每张图起一个临时线程解码
-→ 主线程每帧 try_recv 收图片 → 收齐后上传 GPU 纹理 → 显示
+用户拖拽文件到窗口 → poll_drops() 取 dropped_files → 过滤图片格式
+→ 每张图起一个临时线程解码 → 主线程每帧 try_recv 收图片
+→ 收齐后上传 GPU 纹理 → 显示
 ```
 
-拖拽文件走同样管线，但 `append=true`（追加而非替换）。
+拖拽文件走 `append=true`（追加而非替换）。
 
 ## 布局规则
 
 | 图片数 | 布局 |
 |---|---|
-| 1-4 | 单行，等宽均分，左右 6px margin |
-| 5 | 首行 3 + 次行 2，1px 横线分隔 |
+| 1-3 | 单行，等宽均分，左右 6px margin |
+| 4 | 首行 2 + 次行 2，1px 横线分隔 |
+| 5 | 首行 3 + 次行 2 |
 | 6 | 首行 3 + 次行 3 |
 | 7 | 首行 4 + 次行 3 |
 | 8 | 首行 4 + 次行 4 |
@@ -80,7 +80,8 @@ egui 的自动布局（`ui.horizontal`、`item_spacing`、`centered_and_justifie
 ## 局部模式 (Local Mode)
 
 按 `P` 切换。拖拽框选区域，归一化坐标 [0..1] 同步到所有 cell。
-松手后 `cell::compute_avg_y()` 计算每张图选择区域的平均亮度（BT.601 luma）。
+松手后 `core::image::compute_avg_y()` 计算每张图选择区域的平均亮度（BT.601 luma）。
+标签文本由 `core::image::format_cell_label()` 生成（core 负责内容格式）。
 状态管理在 `state.rs`：`local_mode`, `selection`, `avg_y`, `drag_origin`。
 
 ## egui 0.35 API 注意事项

@@ -5,12 +5,10 @@ use eframe::egui;
 
 use crate::core;
 use crate::state::{AppState, ImageInfo};
-
 use crate::ui;
 
 pub struct MmCompare {
     state: AppState,
-    pending_open: bool,
     load_rx: Option<mpsc::Receiver<Option<core::image::DecodedImage>>>,
     loading_total: usize,
     loading_received: usize,
@@ -22,7 +20,6 @@ impl Default for MmCompare {
     fn default() -> Self {
         Self {
             state: AppState::new(),
-            pending_open: false,
             load_rx: None,
             loading_total: 0,
             loading_received: 0,
@@ -35,20 +32,6 @@ impl Default for MmCompare {
 impl MmCompare {
     fn is_loading(&self) -> bool {
         self.load_rx.is_some()
-    }
-
-    fn start_open(&mut self, ctx: &egui::Context) {
-        let paths: Vec<PathBuf> = rfd::FileDialog::new()
-            .add_filter("Images", &["png", "jpg", "jpeg", "bmp", "gif", "webp"])
-            .pick_files()
-            .map(|v| v.into_iter().take(8).collect())
-            .unwrap_or_default();
-
-        if paths.is_empty() {
-            return;
-        }
-
-        self.spawn_loaders(paths, ctx, false);
     }
 
     fn poll_drops(&mut self, ctx: &egui::Context) {
@@ -168,19 +151,11 @@ impl eframe::App for MmCompare {
             }
         }
 
-        if self.pending_open {
-            self.pending_open = false;
-            let ctx = ui.ctx().clone();
-            self.start_open(&ctx);
-        }
-
         if !self.is_loading() {
             self.poll_drops(ui.ctx());
         }
 
         self.poll_loading(ui.ctx());
-
-        ui::menu::menu_bar(ui, &mut self.pending_open);
 
         egui::CentralPanel::default().show(ui, |ui| {
             ui::viewer::image_grid(

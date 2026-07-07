@@ -19,7 +19,8 @@
 
 | 图片数 | 行数 | 排列 |
 |---|---|---|
-| 1-4 | 1 | 一行均分 |
+| 1-3 | 1 | 一行均分 |
+| 4 | 2 | 2 + 2 |
 | 5 | 2 | 3 + 2 |
 | 6 | 2 | 3 + 3 |
 | 7 | 2 | 4 + 3 |
@@ -37,21 +38,26 @@ row_height  = (available.y - (rows - 1) × SEP) / rows
 
 ## 行内布局
 
-完全手动坐标，不使用 `ui.horizontal` 或 `centered_and_justified`：
+完全手动坐标：
 
-1. `allocate_exact_size(available.x, row_height)` 预留整行空间
-2. 拿到 `row_rect`
-3. 计算行内容总宽：`cols × cell_width + (cols-1) × 13`
-4. 起始 x = `row_rect.left() + (available.x - 内容宽) / 2` 实现居中
-5. 逐个摆放：margin(6) → sep(1) → margin(6) → cell
+1. `allocate_exact_size(available.x, row_height)` 预留整行空间，拿到 `row_rect`
+2. 计算行内容总宽：`cols × cell_width + (cols-1) × (MARGIN + SEP + MARGIN)`
+3. 起始 x = `row_rect.left() + (available.x - 内容宽) / 2` 实现居中
+4. `paint_zone()` 逐个摆放：margin → sep → margin → cell
+
+`paint_zone` 用 `Rect::from_min_size(pos2(x, row_rect.top()), vec2(width, row_height))` 精确定位，用 `ui.painter().rect_filled()` 绘制分隔线，用 `ui.allocate_rect()` 标记占用。
 
 ## 行间分隔
 
 仅 1px 横线，无 margin：
 ```
 allocate_exact_size(available.x, SEP)
-painter().rect_filled()
+painter().rect_filled(response.rect)
 ```
+
+## 交互
+
+cell 交互用 `ui.interact(cell_rect, id, Sense::drag())`，直接指定 `cell_rect` 作为交互区域，不依赖 egui 的自动布局。
 
 ## 为什么不用 egui 自动布局
 

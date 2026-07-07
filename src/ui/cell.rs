@@ -1,5 +1,6 @@
 use eframe::egui;
 
+use crate::core;
 use crate::state::{ImageInfo, NormRect};
 
 /// Draw a single image scaled to fit and centered within the given rect.
@@ -94,42 +95,21 @@ pub fn draw_overlay(
         );
     }
 
-    // Avg Y label in bottom-left
+    // Stats label anchored to cell bottom-left, pixel-precise.
     if let Some(y) = avg_y {
-        ui.put(
-            egui::Rect::from_min_size(
-                cell_rect.left_bottom() + egui::vec2(4.0, -18.0),
-                egui::vec2(120.0, 16.0),
-            ),
-            egui::Label::new(egui::RichText::new(format!("Avg Y: {:.1}", y)).monospace()),
-        );
-    }
-}
+        let text = core::image::format_cell_label(y);
+        let font = egui::FontId::monospace(11.0);
+        let anchor = cell_rect.left_bottom();
 
-/// Compute average Y brightness for the given image in the selection region.
-pub fn compute_avg_y(img: &ImageInfo, selection: NormRect) -> f32 {
-    let w = img.size[0];
-    let h = img.size[1];
-    let x1 = (selection[0] * w as f32) as usize;
-    let y1 = (selection[1] * h as f32) as usize;
-    let x2 = ((selection[2] * w as f32) as usize).min(w - 1);
-    let y2 = ((selection[3] * h as f32) as usize).min(h - 1);
-
-    if x1 >= x2 || y1 >= y2 {
-        return 0.0;
-    }
-
-    let mut sum = 0f64;
-    let mut count = 0u64;
-    for y in y1..=y2 {
-        for x in x1..=x2 {
-            let idx = (y * w + x) * 4;
-            let r = img.rgba[idx] as f64;
-            let g = img.rgba[idx + 1] as f64;
-            let b = img.rgba[idx + 2] as f64;
-            sum += 0.299 * r + 0.587 * g + 0.114 * b;
-            count += 1;
+        for (i, line) in text.lines().rev().enumerate() {
+            let pos = anchor - egui::vec2(0.0, i as f32 * 14.0);
+            ui.painter().text(
+                pos,
+                egui::Align2::LEFT_BOTTOM,
+                line,
+                font.clone(),
+                ui.visuals().text_color(),
+            );
         }
     }
-    (sum / count as f64) as f32
 }
