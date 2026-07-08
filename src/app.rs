@@ -184,7 +184,7 @@ impl eframe::App for MmCompare {
                 flags.push('H');
             }
             if self.state.local_mode {
-                flags.push('L');
+                flags.push('P');
             }
             let title = if flags.is_empty() {
                 "MMCompare".to_string()
