@@ -80,6 +80,7 @@ impl MmCompare {
                     let bytes = std::fs::read(&p).ok()?;
                     let mut img = core::image::decode_image_bytes(&bytes)?;
                     img.path = p;
+                    img.raw_bytes = bytes;
                     Some(img)
                 })();
                 tx.send(decoded).ok();
@@ -105,9 +106,16 @@ impl MmCompare {
 
         if self.loading_received >= self.loading_total {
             let decoded = std::mem::take(&mut self.loading_buf);
+
+            // Compute EXIF and histogram from decoded data
+            let mut exif = Vec::with_capacity(decoded.len());
+            let mut histogram = Vec::with_capacity(decoded.len());
+
             let images: Vec<ImageInfo> = decoded
                 .into_iter()
                 .map(|d| {
+                    exif.push(core::image::extract_exif(&d.raw_bytes));
+                    histogram.push(core::image::compute_y_histogram(&d.rgba));
                     let color_image = egui::ColorImage::from_rgba_unmultiplied(d.size, &d.rgba);
                     let texture = ctx.load_texture(
                         d.path
@@ -128,8 +136,12 @@ impl MmCompare {
 
             if self.loading_append {
                 self.state.append_images(images);
+                self.state.exif.extend(exif);
+                self.state.histogram.extend(histogram);
             } else {
                 self.state.set_images(images);
+                self.state.exif = exif;
+                self.state.histogram = histogram;
             }
 
             self.load_rx = None;
@@ -142,20 +154,45 @@ impl MmCompare {
 
 impl eframe::App for MmCompare {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Toggle local mode
-        if ui.input(|i| i.key_pressed(egui::Key::P)) {
+        // Toggle modes: L=local, E=exif, H=histogram
+        let toggle = |key| ui.input(|i| i.key_pressed(key));
+        let mut changed = false;
+
+        if toggle(egui::Key::L) {
             self.state.local_mode = !self.state.local_mode;
-            let title = if self.state.local_mode {
-                "MMCompare - Local Mode"
-            } else {
-                "MMCompare"
-            };
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::Title(title.into()));
+            changed = true;
             if !self.state.local_mode {
                 self.state.selection = None;
                 self.state.avg_y.fill(None);
             }
+        }
+        if toggle(egui::Key::E) {
+            self.state.show_exif = !self.state.show_exif;
+            changed = true;
+        }
+        if toggle(egui::Key::H) {
+            self.state.show_histogram = !self.state.show_histogram;
+            changed = true;
+        }
+
+        if changed {
+            let mut flags = String::new();
+            if self.state.show_exif {
+                flags.push('E');
+            }
+            if self.state.show_histogram {
+                flags.push('H');
+            }
+            if self.state.local_mode {
+                flags.push('L');
+            }
+            let title = if flags.is_empty() {
+                "MMCompare".to_string()
+            } else {
+                format!("MMCompare - {}", flags)
+            };
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::Title(title));
         }
 
         if !self.is_loading() {

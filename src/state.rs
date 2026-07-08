@@ -17,12 +17,20 @@ pub type NormRect = [f32; 4];
 
 pub struct AppState {
     pub images: Vec<ImageInfo>,
-    /// Whether local mode is active (toggled by 'P').
+    /// Whether local mode is active (toggled by 'L').
     pub local_mode: bool,
+    /// Show EXIF overlay (toggled by 'E').
+    pub show_exif: bool,
+    /// Show histogram overlay (toggled by 'H').
+    pub show_histogram: bool,
     /// The current selection (normalized coords), if any.
     pub selection: Option<NormRect>,
     /// Per-image average Y brightness in the selection region.
     pub avg_y: Vec<Option<f32>>,
+    /// Per-image EXIF text (multi-line).
+    pub exif: Vec<String>,
+    /// Per-image 256-bin Y histogram.
+    pub histogram: Vec<[u32; 256]>,
     /// Drag origin in normalized coords, set on drag start.
     drag_origin: Option<[f32; 2]>,
 }
@@ -32,8 +40,12 @@ impl AppState {
         Self {
             images: Vec::new(),
             local_mode: false,
+            show_exif: false,
+            show_histogram: false,
             selection: None,
             avg_y: Vec::new(),
+            exif: Vec::new(),
+            histogram: Vec::new(),
             drag_origin: None,
         }
     }
@@ -48,7 +60,6 @@ impl AppState {
         let old_len = self.images.len();
         self.images.extend(images);
         self.avg_y.resize(self.images.len(), None);
-        // Clear avg_y for existing images too since selection context changed
         self.avg_y[..old_len].fill(None);
         self.selection = None;
     }
@@ -57,6 +68,8 @@ impl AppState {
     pub fn clear(&mut self) {
         self.images.clear();
         self.avg_y.clear();
+        self.exif.clear();
+        self.histogram.clear();
         self.selection = None;
     }
 

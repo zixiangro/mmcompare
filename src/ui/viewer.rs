@@ -24,7 +24,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.add_space(12.0);
             ui.label("Drag images here to view  (max 8)");
             ui.add_space(4.0);
-            ui.label("Press  P  to toggle local mode");
+            ui.label("E  EXIF    H  Histogram    L  Local mode");
             ui.add_space(12.0);
             ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
         });
@@ -93,12 +93,25 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
 
             handle_drag(state, &resp, img_idx);
             cell::draw_image(ui, &state.images[img_idx], cell_rect);
+            let label = state.avg_y[img_idx]
+                .map(core::image::format_cell_label)
+                .unwrap_or_default();
             cell::draw_overlay(
                 ui,
                 cell_rect,
                 &state.images[img_idx],
                 state.selection,
-                state.avg_y[img_idx],
+                &label,
+                if state.show_exif {
+                    &state.exif[img_idx]
+                } else {
+                    ""
+                },
+                if state.show_histogram {
+                    &state.histogram[img_idx]
+                } else {
+                    &[0; 256]
+                },
                 state.is_dragging(),
             );
 
