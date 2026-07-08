@@ -24,7 +24,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.add_space(12.0);
             ui.label("Drag images here to view  (max 8)");
             ui.add_space(4.0);
-            ui.label("E  EXIF    H  Histogram    L  Local mode");
+            ui.label("E  EXIF    H  Histogram    P  Local mode");
             ui.add_space(12.0);
             ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
         });
@@ -84,15 +84,33 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
 
             let cell_rect =
                 egui::Rect::from_min_size(egui::pos2(x, row_rect.top()), egui::vec2(cell_w, row_h));
-            let sense = if state.local_mode {
+            let sense = if state.local_mode || state.zoom > 1.0 {
                 egui::Sense::drag()
             } else {
                 egui::Sense::hover()
             };
-            let resp = ui.interact(cell_rect, ui.next_auto_id(), sense);
+            let resp = ui.allocate_rect(cell_rect, sense);
 
-            handle_drag(state, &resp, img_idx);
-            cell::draw_image(ui, &state.images[img_idx], cell_rect);
+            // Zoom/pan with scroll/drag (non-local mode only)
+            if !state.local_mode {
+                if resp.hovered() {
+                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                    if scroll != 0.0 {
+                        state.zoom = (state.zoom + scroll * 0.005).max(1.0);
+                    }
+                }
+                if resp.dragged_by(egui::PointerButton::Primary) {
+                    let delta = resp.drag_delta();
+                    state.pan[0] += delta.x;
+                    state.pan[1] += delta.y;
+                }
+                if state.zoom <= 1.0 {
+                    state.pan = [0.0, 0.0];
+                }
+            }
+
+            handle_drag(state, &resp, img_idx, state.zoom, state.pan);
+            cell::draw_image(ui, &state.images[img_idx], cell_rect, state.zoom, state.pan);
             let label = state.avg_y[img_idx]
                 .map(core::image::format_cell_label)
                 .unwrap_or_default();
@@ -112,6 +130,8 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 } else {
                     &[0; 256]
                 },
+                state.zoom,
+                state.pan,
                 state.is_dragging(),
             );
 
@@ -140,7 +160,13 @@ fn paint_zone(
     x + width
 }
 
-fn handle_drag(state: &mut AppState, resp: &egui::Response, img_idx: usize) {
+fn handle_drag(
+    state: &mut AppState,
+    resp: &egui::Response,
+    img_idx: usize,
+    zoom: f32,
+    pan: [f32; 2],
+) {
     if !state.local_mode || resp.dragged_by(egui::PointerButton::Secondary) {
         return;
     }
@@ -148,7 +174,7 @@ fn handle_drag(state: &mut AppState, resp: &egui::Response, img_idx: usize) {
     if let Some(mouse_pos) = resp.interact_pointer_pos() {
         if resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(norm) =
-                cell::mouse_to_norm(mouse_pos, resp.rect, state.images[img_idx].size)
+                cell::mouse_to_norm(mouse_pos, resp.rect, state.images[img_idx].size, zoom, pan)
             {
                 state.drag_start(norm);
             }
@@ -156,7 +182,7 @@ fn handle_drag(state: &mut AppState, resp: &egui::Response, img_idx: usize) {
 
         if resp.dragged_by(egui::PointerButton::Primary) && state.is_dragging() {
             if let Some(norm) =
-                cell::mouse_to_norm(mouse_pos, resp.rect, state.images[img_idx].size)
+                cell::mouse_to_norm(mouse_pos, resp.rect, state.images[img_idx].size, zoom, pan)
             {
                 state.drag_update(norm);
             }

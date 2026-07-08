@@ -154,11 +154,11 @@ impl MmCompare {
 
 impl eframe::App for MmCompare {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Toggle modes: L=local, E=exif, H=histogram
+        // Toggle modes: P=local, E=exif, H=histogram
         let toggle = |key| ui.input(|i| i.key_pressed(key));
         let mut changed = false;
 
-        if toggle(egui::Key::L) {
+        if toggle(egui::Key::P) {
             self.state.local_mode = !self.state.local_mode;
             changed = true;
             if !self.state.local_mode {

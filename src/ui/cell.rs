@@ -2,43 +2,57 @@ use eframe::egui;
 
 use crate::state::{ImageInfo, NormRect};
 
-pub fn draw_image(ui: &mut egui::Ui, img: &ImageInfo, rect: egui::Rect) {
-    let img_rect = image_display_rect(rect, img.size);
-    ui.put(
+pub fn draw_image(ui: &mut egui::Ui, img: &ImageInfo, rect: egui::Rect, zoom: f32, pan: [f32; 2]) {
+    let img_rect = image_display_rect(rect, img.size, zoom, pan);
+    ui.painter().with_clip_rect(rect).image(
+        img.texture.id(),
         img_rect,
-        egui::Image::from_texture(egui::load::SizedTexture::new(
-            img.texture.id(),
-            img_rect.size(),
-        )),
+        egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
+        egui::Color32::WHITE,
     );
 }
 
-pub fn image_display_rect(cell_rect: egui::Rect, img_size: [usize; 2]) -> egui::Rect {
+pub fn image_display_rect(
+    cell_rect: egui::Rect,
+    img_size: [usize; 2],
+    zoom: f32,
+    pan: [f32; 2],
+) -> egui::Rect {
     let img_w = img_size[0] as f32;
     let img_h = img_size[1] as f32;
-    let scale = (cell_rect.width() / img_w).min(cell_rect.height() / img_h);
-    let offset = (
-        (cell_rect.width() - img_w * scale) / 2.0,
-        (cell_rect.height() - img_h * scale) / 2.0,
-    );
-    egui::Rect::from_min_size(
-        cell_rect.min + egui::vec2(offset.0, offset.1),
-        egui::vec2(img_w * scale, img_h * scale),
-    )
+    let scale = (cell_rect.width() / img_w).min(cell_rect.height() / img_h) * zoom;
+    let dw = img_w * scale;
+    let dh = img_h * scale;
+    let cw = cell_rect.width();
+    let ch = cell_rect.height();
+    // Image must always cover the cell when larger; otherwise center it
+    let ox = if dw > cw {
+        ((cw - dw) / 2.0 + pan[0]).clamp(cw - dw, 0.0)
+    } else {
+        (cw - dw) / 2.0
+    };
+    let oy = if dh > ch {
+        ((ch - dh) / 2.0 + pan[1]).clamp(ch - dh, 0.0)
+    } else {
+        (ch - dh) / 2.0
+    };
+    egui::Rect::from_min_size(cell_rect.min + egui::vec2(ox, oy), egui::vec2(dw, dh))
 }
 
 pub fn mouse_to_norm(
     mouse_pos: egui::Pos2,
     cell_rect: egui::Rect,
     img_size: [usize; 2],
+    zoom: f32,
+    pan: [f32; 2],
 ) -> Option<[f32; 2]> {
-    let img_rect = image_display_rect(cell_rect, img_size);
-    if !img_rect.contains(mouse_pos) {
+    if !cell_rect.contains(mouse_pos) {
         return None;
     }
+    let img_rect = image_display_rect(cell_rect, img_size, zoom, pan);
     Some([
-        (mouse_pos.x - img_rect.min.x) / img_rect.width(),
-        (mouse_pos.y - img_rect.min.y) / img_rect.height(),
+        ((mouse_pos.x - img_rect.min.x) / img_rect.width()).clamp(0.0, 1.0),
+        ((mouse_pos.y - img_rect.min.y) / img_rect.height()).clamp(0.0, 1.0),
     ])
 }
 
@@ -50,9 +64,11 @@ pub fn draw_overlay(
     avg_y_label: &str,
     exif: &str,
     histogram: &[u32; 256],
+    zoom: f32,
+    pan: [f32; 2],
     is_dragging: bool,
 ) {
-    let img_rect = image_display_rect(cell_rect, img.size);
+    let img_rect = image_display_rect(cell_rect, img.size, zoom, pan);
 
     if let Some(sel) = selection {
         let (x1, y1) = (

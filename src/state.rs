@@ -31,6 +31,10 @@ pub struct AppState {
     pub exif: Vec<String>,
     /// Per-image 256-bin Y histogram.
     pub histogram: Vec<[u32; 256]>,
+    /// Per-image zoom level (1.0 = default fit).
+    pub zoom: f32,
+    /// Pan offset in pixels (non-local mode).
+    pub pan: [f32; 2],
     /// Drag origin in normalized coords, set on drag start.
     drag_origin: Option<[f32; 2]>,
 }
@@ -46,6 +50,8 @@ impl AppState {
             avg_y: Vec::new(),
             exif: Vec::new(),
             histogram: Vec::new(),
+            zoom: 1.0,
+            pan: [0.0, 0.0],
             drag_origin: None,
         }
     }
@@ -75,6 +81,7 @@ impl AppState {
 
     /// Start a selection drag at normalized position.
     pub fn drag_start(&mut self, norm: [f32; 2]) {
+        self.selection = None;
         self.drag_origin = Some(norm);
     }
 
