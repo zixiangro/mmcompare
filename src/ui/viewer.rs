@@ -23,8 +23,9 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.label(egui::RichText::new("MMCompare").size(24.0).strong());
             ui.add_space(12.0);
             ui.label("Drag images here to view  (max 8)");
-            ui.add_space(4.0);
-            ui.label("E  EXIF    H  Histogram    P  Local mode");
+            ui.add_space(6.0);
+            ui.label("P  Local mode    E  EXIF    H  Histogram");
+            ui.label("Scroll  Zoom    Drag  Pan    Q  Compare (2 imgs)");
             ui.add_space(12.0);
             ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
         });
@@ -109,8 +110,18 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 }
             }
 
+            // Q-key swap: if 2 images, cell 0 shows image 1 while Q held
+            let compare = state.images.len() == 2 && ui.input(|i| i.key_down(egui::Key::Q));
+            let draw_idx = if compare && img_idx == 0 { 1 } else { img_idx };
+
             handle_drag(state, &resp, img_idx, state.zoom, state.pan);
-            cell::draw_image(ui, &state.images[img_idx], cell_rect, state.zoom, state.pan);
+            cell::draw_image(
+                ui,
+                &state.images[draw_idx],
+                cell_rect,
+                state.zoom,
+                state.pan,
+            );
             let label = state.avg_y[img_idx]
                 .map(core::image::format_cell_label)
                 .unwrap_or_default();
