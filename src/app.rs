@@ -9,10 +9,10 @@ use crate::ui;
 
 pub struct MmCompare {
     state: AppState,
-    load_rx: Option<mpsc::Receiver<Option<core::image::DecodedImage>>>,
+    load_rx: Option<mpsc::Receiver<(usize, Option<core::image::DecodedImage>)>>,
     loading_total: usize,
     loading_received: usize,
-    loading_buf: Vec<core::image::DecodedImage>,
+    loading_buf: Vec<(usize, core::image::DecodedImage)>,
     loading_append: bool,
 }
 
@@ -44,26 +44,41 @@ impl MmCompare {
             .saturating_sub(self.state.images.len())
             .saturating_sub(self.loading_total);
 
-        let paths: Vec<PathBuf> = dropped
+        let mut paths: Vec<PathBuf> = dropped
             .into_iter()
             .filter_map(|f| f.path)
             .filter(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(|e| {
-                        matches!(
-                            e.to_ascii_lowercase().as_str(),
-                            "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
-                        )
-                    })
-                    .unwrap_or(false)
+                !self.state.loaded_paths.contains(p)
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| {
+                            matches!(
+                                e.to_ascii_lowercase().as_str(),
+                                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
+                            )
+                        })
+                        .unwrap_or(false)
             })
             .take(remaining)
             .collect();
 
-        if !paths.is_empty() {
-            self.spawn_loaders(paths, ctx, true);
+        if paths.is_empty() {
+            return;
         }
+
+        // Sort by filename, case-insensitive
+        paths.sort_by(|a, b| {
+            let na = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let nb = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            na.to_lowercase().cmp(&nb.to_lowercase())
+        });
+
+        // Mark as loading to prevent re-drop
+        for p in &paths {
+            self.state.loaded_paths.insert(p.clone());
+        }
+
+        self.spawn_loaders(paths, ctx, true);
     }
 
     fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context, append: bool) {
@@ -73,7 +88,7 @@ impl MmCompare {
         self.loading_append = append;
         let (tx, rx) = mpsc::channel();
 
-        for p in paths {
+        for (i, p) in paths.into_iter().enumerate() {
             let tx = tx.clone();
             std::thread::spawn(move || {
                 let decoded = (|| {
@@ -83,7 +98,7 @@ impl MmCompare {
                     img.raw_bytes = bytes;
                     Some(img)
                 })();
-                tx.send(decoded).ok();
+                tx.send((i, decoded)).ok();
             });
         }
         drop(tx);
@@ -97,15 +112,18 @@ impl MmCompare {
             return;
         };
 
-        while let Ok(decoded) = rx.try_recv() {
+        while let Ok((i, decoded)) = rx.try_recv() {
             if let Some(img) = decoded {
-                self.loading_buf.push(img);
+                self.loading_buf.push((i, img));
             }
             self.loading_received += 1;
         }
 
         if self.loading_received >= self.loading_total {
-            let decoded = std::mem::take(&mut self.loading_buf);
+            let mut decoded = std::mem::take(&mut self.loading_buf);
+            // Sort by original index to preserve file order
+            decoded.sort_by_key(|(i, _)| *i);
+            let decoded: Vec<_> = decoded.into_iter().map(|(_, d)| d).collect();
 
             // Compute EXIF and histogram from decoded data
             let mut exif = Vec::with_capacity(decoded.len());

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 use eframe::egui;
@@ -35,6 +36,8 @@ pub struct AppState {
     pub zoom: f32,
     /// Pan offset in pixels (non-local mode).
     pub pan: [f32; 2],
+    /// Set of loaded file paths to prevent duplicates.
+    pub loaded_paths: HashSet<PathBuf>,
     /// Drag origin in normalized coords, set on drag start.
     drag_origin: Option<[f32; 2]>,
 }
@@ -52,6 +55,7 @@ impl AppState {
             histogram: Vec::new(),
             zoom: 1.0,
             pan: [0.0, 0.0],
+            loaded_paths: HashSet::new(),
             drag_origin: None,
         }
     }
@@ -59,6 +63,7 @@ impl AppState {
     pub fn set_images(&mut self, images: Vec<ImageInfo>) {
         self.avg_y.resize(images.len(), None);
         self.selection = None;
+        self.loaded_paths = images.iter().map(|i| i.path.clone()).collect();
         self.images = images;
     }
 
@@ -68,6 +73,9 @@ impl AppState {
         self.avg_y.resize(self.images.len(), None);
         self.avg_y[..old_len].fill(None);
         self.selection = None;
+        for img in &self.images[old_len..] {
+            self.loaded_paths.insert(img.path.clone());
+        }
     }
 
     #[allow(dead_code)]
@@ -76,6 +84,7 @@ impl AppState {
         self.avg_y.clear();
         self.exif.clear();
         self.histogram.clear();
+        self.loaded_paths.clear();
         self.selection = None;
     }
 
