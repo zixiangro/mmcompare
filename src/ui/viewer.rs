@@ -24,8 +24,10 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.add_space(12.0);
             ui.label("Drag images here to view  (max 8)");
             ui.add_space(6.0);
-            ui.label("P  Local mode    E  EXIF    H  Histogram");
-            ui.label("Scroll  Zoom    Drag  Pan    Q  Compare (2 imgs)");
+            ui.label("Q: Compare 2 images");
+            ui.label("P: Local mode");
+            ui.label("E: Show EXIF");
+            ui.label("H: Show histogram");
             ui.add_space(12.0);
             ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
         });
