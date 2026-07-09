@@ -12,6 +12,9 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     let img = img.to_rgba8();
     let size = [img.width() as usize, img.height() as usize];
     let rgba = img.into_raw();
+    if size[0] == 0 || size[1] == 0 || rgba.len() != size[0] * size[1] * 4 {
+        return None;
+    }
     Some(DecodedImage {
         rgba,
         size,

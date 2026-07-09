@@ -66,13 +66,6 @@ impl AppState {
         }
     }
 
-    pub fn set_images(&mut self, images: Vec<ImageInfo>) {
-        self.avg_y.resize(images.len(), None);
-        self.selection = None;
-        self.loaded_paths = images.iter().map(|i| i.path.clone()).collect();
-        self.images = images;
-    }
-
     pub fn append_images(&mut self, images: Vec<ImageInfo>) {
         let old_len = self.images.len();
         self.images.extend(images);
@@ -82,16 +75,6 @@ impl AppState {
         for img in &self.images[old_len..] {
             self.loaded_paths.insert(img.path.clone());
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn clear(&mut self) {
-        self.images.clear();
-        self.avg_y.clear();
-        self.exif.clear();
-        self.histogram.clear();
-        self.loaded_paths.clear();
-        self.selection = None;
     }
 
     /// Start a selection drag at normalized position.

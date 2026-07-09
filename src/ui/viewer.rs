@@ -28,6 +28,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.label("P: Local mode");
             ui.label("E: Show EXIF");
             ui.label("H: Show histogram");
+            ui.label("Ctrl: Delete / Reorder");
             ui.add_space(12.0);
             ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
         });
@@ -69,22 +70,20 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.allocate_rect(sr, egui::Sense::hover());
         }
 
-        let row_rect =
-            egui::Rect::from_min_size(egui::pos2(grid.left(), row_top), egui::vec2(avail.x, row_h));
         let row_content = col_count as f32 * cell_w + (col_count - 1) as f32 * inter;
-        let mut x = row_rect.left() + (avail.x - row_content) / 2.0;
+        let mut x = grid.left() + (avail.x - row_content) / 2.0;
 
         for i in 0..col_count {
             let img_idx = offset + i;
 
             if i > 0 {
-                x = paint_zone(ui, x, row_rect, MARGIN, None);
-                x = paint_zone(ui, x, row_rect, SEP, Some(sep_color));
-                x = paint_zone(ui, x, row_rect, MARGIN, None);
+                x = paint_zone(ui, x, row_top, row_h, MARGIN, None);
+                x = paint_zone(ui, x, row_top, row_h, SEP, Some(sep_color));
+                x = paint_zone(ui, x, row_top, row_h, MARGIN, None);
             }
 
             let cell_rect =
-                egui::Rect::from_min_size(egui::pos2(x, row_rect.top()), egui::vec2(cell_w, row_h));
+                egui::Rect::from_min_size(egui::pos2(x, row_top), egui::vec2(cell_w, row_h));
 
             let sense = if ctrl {
                 egui::Sense::drag()
@@ -95,32 +94,12 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             };
             let resp = ui.allocate_rect(cell_rect, sense);
 
-            // Ctrl close button (after cell alloc)
+            // Ctrl close button interaction (before image)
             if ctrl {
                 let s = 14.0;
                 let btn = egui::Rect::from_min_size(
                     cell_rect.right_top() + egui::vec2(-s - 4.0, 4.0),
                     egui::vec2(s, s),
-                );
-                ui.painter().rect_filled(
-                    btn,
-                    2.0,
-                    egui::Color32::from_rgba_premultiplied(200, 50, 50, 200),
-                );
-                let w = egui::Color32::WHITE;
-                ui.painter().line_segment(
-                    [
-                        btn.left_top() + egui::vec2(3.0, 3.0),
-                        btn.right_bottom() - egui::vec2(3.0, 3.0),
-                    ],
-                    egui::Stroke::new(2.0, w),
-                );
-                ui.painter().line_segment(
-                    [
-                        btn.right_top() + egui::vec2(-3.0, 3.0),
-                        btn.left_bottom() + egui::vec2(3.0, -3.0),
-                    ],
-                    egui::Stroke::new(2.0, w),
                 );
                 if ui.allocate_rect(btn, egui::Sense::click()).clicked() {
                     state.pending_remove.push(img_idx);
@@ -164,25 +143,6 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 }
             }
 
-            // Reorder highlight (check global hover during drag)
-            if ctrl && state.reorder_src.is_some() {
-                if state.reorder_src == Some(img_idx) {
-                    ui.painter().rect_filled(
-                        cell_rect,
-                        0.0,
-                        egui::Color32::from_rgba_premultiplied(0, 120, 255, 60),
-                    );
-                } else if let Some(hp) = ui.input(|i| i.pointer.hover_pos()) {
-                    if cell_rect.contains(hp) {
-                        ui.painter().rect_filled(
-                            cell_rect,
-                            0.0,
-                            egui::Color32::from_rgba_premultiplied(255, 200, 0, 40),
-                        );
-                    }
-                }
-            }
-
             // Q-key swap
             let compare = state.images.len() == 2 && ui.input(|i| i.key_down(egui::Key::Q));
             let draw_idx = if compare && img_idx == 0 { 1 } else { img_idx };
@@ -195,6 +155,57 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 state.zoom,
                 state.pan,
             );
+
+            // Ctrl visual overlays (on top of image)
+            let reorder_active = ctrl && state.reorder_src.is_some();
+            if reorder_active {
+                let src = state.reorder_src == Some(img_idx);
+                let dst = !src
+                    && ui
+                        .input(|i| i.pointer.hover_pos())
+                        .map_or(false, |hp| cell_rect.contains(hp));
+                if src {
+                    ui.painter().rect_filled(
+                        cell_rect,
+                        0.0,
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 60),
+                    );
+                } else if dst {
+                    ui.painter().rect_filled(
+                        cell_rect,
+                        0.0,
+                        egui::Color32::from_rgba_premultiplied(0, 0, 0, 40),
+                    );
+                }
+            }
+            if ctrl {
+                let s = 14.0;
+                let btn = egui::Rect::from_min_size(
+                    cell_rect.right_top() + egui::vec2(-s - 4.0, 4.0),
+                    egui::vec2(s, s),
+                );
+                ui.painter().rect_filled(
+                    btn,
+                    2.0,
+                    egui::Color32::from_rgba_premultiplied(200, 50, 50, 200),
+                );
+                let w = egui::Color32::WHITE;
+                ui.painter().line_segment(
+                    [
+                        btn.left_top() + egui::vec2(3.0, 3.0),
+                        btn.right_bottom() - egui::vec2(3.0, 3.0),
+                    ],
+                    egui::Stroke::new(2.0, w),
+                );
+                ui.painter().line_segment(
+                    [
+                        btn.right_top() + egui::vec2(-3.0, 3.0),
+                        btn.left_bottom() + egui::vec2(3.0, -3.0),
+                    ],
+                    egui::Stroke::new(2.0, w),
+                );
+            }
+
             let label = state.avg_y[img_idx]
                 .map(core::image::format_cell_label)
                 .unwrap_or_default();
@@ -243,14 +254,12 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
 fn paint_zone(
     ui: &mut egui::Ui,
     x: f32,
-    row_rect: egui::Rect,
+    row_top: f32,
+    row_h: f32,
     width: f32,
     color: Option<egui::Color32>,
 ) -> f32 {
-    let rect = egui::Rect::from_min_size(
-        egui::pos2(x, row_rect.top()),
-        egui::vec2(width, row_rect.height()),
-    );
+    let rect = egui::Rect::from_min_size(egui::pos2(x, row_top), egui::vec2(width, row_h));
     if let Some(c) = color {
         ui.painter().rect_filled(rect, 0.0, c);
     }

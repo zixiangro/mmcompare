@@ -13,7 +13,6 @@ pub struct MmCompare {
     loading_total: usize,
     loading_received: usize,
     loading_buf: Vec<(usize, core::image::DecodedImage)>,
-    loading_append: bool,
 }
 
 impl Default for MmCompare {
@@ -24,7 +23,6 @@ impl Default for MmCompare {
             loading_total: 0,
             loading_received: 0,
             loading_buf: Vec::new(),
-            loading_append: false,
         }
     }
 }
@@ -78,14 +76,13 @@ impl MmCompare {
             self.state.loaded_paths.insert(p.clone());
         }
 
-        self.spawn_loaders(paths, ctx, true);
+        self.spawn_loaders(paths, ctx);
     }
 
-    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context, append: bool) {
+    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         self.loading_total = paths.len();
         self.loading_received = 0;
         self.loading_buf.clear();
-        self.loading_append = append;
         let (tx, rx) = mpsc::channel();
 
         for (i, p) in paths.into_iter().enumerate() {
@@ -152,15 +149,9 @@ impl MmCompare {
                 })
                 .collect();
 
-            if self.loading_append {
-                self.state.append_images(images);
-                self.state.exif.extend(exif);
-                self.state.histogram.extend(histogram);
-            } else {
-                self.state.set_images(images);
-                self.state.exif = exif;
-                self.state.histogram = histogram;
-            }
+            self.state.append_images(images);
+            self.state.exif.extend(exif);
+            self.state.histogram.extend(histogram);
 
             self.load_rx = None;
             self.loading_total = 0;
