@@ -38,6 +38,10 @@ pub struct AppState {
     pub pan: [f32; 2],
     /// Set of loaded file paths to prevent duplicates.
     pub loaded_paths: HashSet<PathBuf>,
+    /// Index of cell being dragged in reorder mode.
+    pub reorder_src: Option<usize>,
+    /// Images to remove after current frame.
+    pub pending_remove: Vec<usize>,
     /// Drag origin in normalized coords, set on drag start.
     drag_origin: Option<[f32; 2]>,
 }
@@ -56,6 +60,8 @@ impl AppState {
             zoom: 1.0,
             pan: [0.0, 0.0],
             loaded_paths: HashSet::new(),
+            reorder_src: None,
+            pending_remove: Vec::new(),
             drag_origin: None,
         }
     }
@@ -118,5 +124,20 @@ impl AppState {
     #[inline]
     pub fn is_dragging(&self) -> bool {
         self.drag_origin.is_some()
+    }
+
+    pub fn swap_images(&mut self, a: usize, b: usize) {
+        self.images.swap(a, b);
+        self.avg_y.swap(a, b);
+        self.exif.swap(a, b);
+        self.histogram.swap(a, b);
+    }
+
+    pub fn remove_image(&mut self, idx: usize) {
+        self.loaded_paths.remove(&self.images[idx].path);
+        self.images.remove(idx);
+        self.avg_y.remove(idx);
+        self.exif.remove(idx);
+        self.histogram.remove(idx);
     }
 }
