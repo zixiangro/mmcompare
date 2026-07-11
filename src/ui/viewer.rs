@@ -232,7 +232,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 );
             }
 
-            let label = state.avg_y[img_idx]
+            let label = state.avg_stats[img_idx]
                 .as_ref()
                 .map(|s| core::image::format_cell_label(s))
                 .unwrap_or_default();
@@ -279,7 +279,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             }
         }
         state.selection.fill(None);
-        state.avg_y.fill(None);
+        state.avg_stats.fill(None);
     }
 }
 
@@ -296,27 +296,7 @@ fn apply_clamp_feedback(state: &mut AppState, snapshots: &[CellSnapshot]) {
             state.pan[0] + state.pan_offset[s.idx][0],
             state.pan[1] + state.pan_offset[s.idx][1],
         ];
-        let img_w = s.img_size[0] as f32;
-        let img_h = s.img_size[1] as f32;
-        let scale = (s.cell_rect.width() / img_w).min(s.cell_rect.height() / img_h) * state.zoom;
-        let dw = img_w * scale;
-        let dh = img_h * scale;
-        let cw = s.cell_rect.width();
-        let ch = s.cell_rect.height();
-        let cx = (cw - dw) / 2.0;
-        let cy = (ch - dh) / 2.0;
-
-        let clamped_x = if dw > cw {
-            (cx + raw[0]).clamp(cw - dw, 0.0)
-        } else {
-            cx
-        };
-        let clamped_y = if dh > ch {
-            (cy + raw[1]).clamp(ch - dh, 0.0)
-        } else {
-            cy
-        };
-        let eff = [clamped_x - cx, clamped_y - cy];
+        let eff = imcell::clamp_pan(raw, s.cell_rect, s.img_size, state.zoom);
         let diff = [raw[0] - eff[0], raw[1] - eff[1]];
 
         if diff[0] == 0.0 && diff[1] == 0.0 {
@@ -428,7 +408,7 @@ fn handle_drag(
         if let Some(cell) = state.drag_end() {
             if let Some(sel) = state.selection[cell] {
                 for (j, img) in state.images.iter().enumerate() {
-                    state.avg_y[j] = Some(core::image::compute_selection_stats(
+                    state.avg_stats[j] = Some(core::image::compute_selection_stats(
                         &img.rgba,
                         img.size[0],
                         img.size[1],
@@ -442,7 +422,7 @@ fn handle_drag(
         if let Some(cell) = state.drag_end() {
             if let Some(sel) = state.selection[cell] {
                 let img = &state.images[cell];
-                state.avg_y[cell] = Some(core::image::compute_selection_stats(
+                state.avg_stats[cell] = Some(core::image::compute_selection_stats(
                     &img.rgba,
                     img.size[0],
                     img.size[1],

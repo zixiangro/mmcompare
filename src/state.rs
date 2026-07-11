@@ -1,23 +1,15 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use eframe::egui;
-
 use crate::core::image::AvgStats;
 
 pub struct ImageInfo {
-    pub texture: egui::TextureHandle,
-    /// Dimensions [width, height] (updated on rotation).
+    pub texture: eframe::egui::TextureHandle,
     pub size: [usize; 2],
-    /// Raw RGBA pixels for sampling.
     pub rgba: Vec<u8>,
-    #[allow(dead_code)]
     pub path: PathBuf,
-    /// Number of 90° CW rotations applied (0..3).
-    pub rotation: u8,
 }
 
-/// Normalized selection rect [x1, y1, x2, y2] in 0..1 range.
 pub type NormRect = [f32; 4];
 
 #[derive(Clone, Copy, PartialEq)]
@@ -32,15 +24,11 @@ pub struct AppState {
     pub show_exif: bool,
     pub show_histogram: bool,
     pub selection: Vec<Option<NormRect>>,
-    pub avg_y: Vec<Option<AvgStats>>,
+    pub avg_stats: Vec<Option<AvgStats>>,
     pub exif: Vec<String>,
     pub histogram: Vec<[u32; 256]>,
-    /// Global zoom level.
     pub zoom: f32,
-    /// Global pan (left-drag updates this for all).
     pub pan: [f32; 2],
-    /// Per-cell extra pan offset (right-drag updates only this cell).
-    /// Final pan for cell = global + offset, then clamped.
     pub pan_offset: Vec<[f32; 2]>,
     pub loaded_paths: HashSet<PathBuf>,
     pub reorder_src: Option<usize>,
@@ -58,7 +46,7 @@ impl AppState {
             show_exif: false,
             show_histogram: false,
             selection: Vec::new(),
-            avg_y: Vec::new(),
+            avg_stats: Vec::new(),
             exif: Vec::new(),
             histogram: Vec::new(),
             zoom: 1.0,
@@ -77,19 +65,19 @@ impl AppState {
         let old_len = self.images.len();
         let new_len = old_len + images.len();
         self.images.extend(images);
-        self.avg_y.resize(new_len, None);
+        self.avg_stats.resize(new_len, None);
         self.selection.resize(new_len, None);
         self.pan_offset.resize(new_len, [0.0, 0.0]);
         for img in &self.images[old_len..] {
             self.loaded_paths.insert(img.path.clone());
         }
-        self.avg_y.fill(None);
+        self.avg_stats.fill(None);
         self.selection.fill(None);
     }
 
     pub fn drag_start_new(&mut self, cell: usize, norm: [f32; 2]) {
         self.selection.iter_mut().for_each(|s| *s = None);
-        self.avg_y.fill(None);
+        self.avg_stats.fill(None);
         self.drag_origin = Some(norm);
         self.drag_cell = Some(cell);
         self.drag_kind = Some(DragKind::NewSelection);
@@ -160,7 +148,7 @@ impl AppState {
 
     pub fn swap_images(&mut self, a: usize, b: usize) {
         self.images.swap(a, b);
-        self.avg_y.swap(a, b);
+        self.avg_stats.swap(a, b);
         self.exif.swap(a, b);
         self.histogram.swap(a, b);
         self.selection.swap(a, b);
@@ -170,51 +158,10 @@ impl AppState {
     pub fn remove_image(&mut self, idx: usize) {
         self.loaded_paths.remove(&self.images[idx].path);
         self.images.remove(idx);
-        self.avg_y.remove(idx);
+        self.avg_stats.remove(idx);
         self.exif.remove(idx);
         self.histogram.remove(idx);
         self.selection.remove(idx);
         self.pan_offset.remove(idx);
-    }
-
-    /// Rotate rgba 90° CW, re-upload texture, recompute histogram.
-    /// If in local mode, clear all selections.
-    pub fn rotate_image(&mut self, idx: usize, ctx: &egui::Context) {
-        let img = &mut self.images[idx];
-        let (w, h) = (img.size[0], img.size[1]);
-        let mut new_rgba = vec![0u8; w * h * 4];
-        for y in 0..h {
-            for x in 0..w {
-                let src = (y * w + x) * 4;
-                let dst = (x * h + (h - 1 - y)) * 4;
-                new_rgba[dst..dst + 4].copy_from_slice(&img.rgba[src..src + 4]);
-            }
-        }
-        img.rgba = new_rgba;
-        img.size = [h, w];
-        img.rotation = (img.rotation + 1) % 4;
-
-        let color_image =
-            egui::ColorImage::from_rgba_unmultiplied([img.size[0], img.size[1]], &img.rgba);
-        img.texture = ctx.load_texture(
-            img.path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("image"),
-            color_image,
-            egui::TextureOptions::default(),
-        );
-
-        if idx < self.histogram.len() {
-            self.histogram[idx] = crate::core::image::compute_y_histogram(&img.rgba);
-        }
-
-        if self.local_mode {
-            self.selection.fill(None);
-            self.avg_y.fill(None);
-        } else {
-            self.avg_y[idx] = None;
-            self.selection[idx] = None;
-        }
     }
 }

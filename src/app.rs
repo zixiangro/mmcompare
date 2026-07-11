@@ -64,14 +64,12 @@ impl MmCompare {
             return;
         }
 
-        // Sort by filename, case-insensitive
         paths.sort_by(|a, b| {
             let na = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
             let nb = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
             na.to_lowercase().cmp(&nb.to_lowercase())
         });
 
-        // Mark as loading to prevent re-drop
         for p in &paths {
             self.state.loaded_paths.insert(p.clone());
         }
@@ -143,7 +141,6 @@ impl MmCompare {
                         size: d.size,
                         rgba: d.rgba,
                         path: d.path,
-                        rotation: 0,
                     }
                 })
                 .collect();
@@ -158,11 +155,41 @@ impl MmCompare {
             ctx.request_repaint();
         }
     }
+
+    fn rotate_image(&mut self, idx: usize, ctx: &egui::Context) {
+        let img = &mut self.state.images[idx];
+        let (new_rgba, new_size) =
+            core::image::rotate_rgba_90_cw(&img.rgba, img.size[0], img.size[1]);
+        img.rgba = new_rgba;
+        img.size = new_size;
+
+        let color_image =
+            egui::ColorImage::from_rgba_unmultiplied([img.size[0], img.size[1]], &img.rgba);
+        img.texture = ctx.load_texture(
+            img.path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("image"),
+            color_image,
+            egui::TextureOptions::default(),
+        );
+
+        if idx < self.state.histogram.len() {
+            self.state.histogram[idx] = core::image::compute_y_histogram(&img.rgba);
+        }
+
+        if self.state.local_mode {
+            self.state.selection.fill(None);
+            self.state.avg_stats.fill(None);
+        } else {
+            self.state.avg_stats[idx] = None;
+            self.state.selection[idx] = None;
+        }
+    }
 }
 
 impl eframe::App for MmCompare {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // ── Mode toggles ──────────────────────────────────
         let toggle = |key| ui.input(|i| i.key_pressed(key));
         let mut changed = false;
 
@@ -171,7 +198,7 @@ impl eframe::App for MmCompare {
             changed = true;
             if !self.state.local_mode {
                 self.state.selection.fill(None);
-                self.state.avg_y.fill(None);
+                self.state.avg_stats.fill(None);
             }
         }
         if toggle(egui::Key::E) {
@@ -183,7 +210,6 @@ impl eframe::App for MmCompare {
             changed = true;
         }
 
-        // ── Rotation: keys 1-8 ────────────────────────────
         let num_keys = [
             egui::Key::Num1,
             egui::Key::Num2,
@@ -196,7 +222,7 @@ impl eframe::App for MmCompare {
         ];
         for (idx, &key) in num_keys.iter().enumerate() {
             if ui.input(|i| i.key_pressed(key)) && idx < self.state.images.len() {
-                self.state.rotate_image(idx, ui.ctx());
+                self.rotate_image(idx, ui.ctx());
             }
         }
 

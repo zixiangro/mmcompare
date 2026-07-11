@@ -25,7 +25,6 @@ pub fn image_display_rect(
     let dh = img_h * scale;
     let cw = cell_rect.width();
     let ch = cell_rect.height();
-    // Image must always cover the cell when larger; otherwise center it
     let ox = if dw > cw {
         ((cw - dw) / 2.0 + pan[0]).clamp(cw - dw, 0.0)
     } else {
@@ -37,6 +36,35 @@ pub fn image_display_rect(
         (ch - dh) / 2.0
     };
     egui::Rect::from_min_size(cell_rect.min + egui::vec2(ox, oy), egui::vec2(dw, dh))
+}
+
+/// Clamp raw pan to the effective value that image_display_rect would produce.
+pub fn clamp_pan(
+    raw: [f32; 2],
+    cell_rect: egui::Rect,
+    img_size: [usize; 2],
+    zoom: f32,
+) -> [f32; 2] {
+    let img_w = img_size[0] as f32;
+    let img_h = img_size[1] as f32;
+    let scale = (cell_rect.width() / img_w).min(cell_rect.height() / img_h) * zoom;
+    let dw = img_w * scale;
+    let dh = img_h * scale;
+    let cw = cell_rect.width();
+    let ch = cell_rect.height();
+    let cx = (cw - dw) / 2.0;
+    let cy = (ch - dh) / 2.0;
+    let clamped_x = if dw > cw {
+        (cx + raw[0]).clamp(cw - dw, 0.0)
+    } else {
+        cx
+    };
+    let clamped_y = if dh > ch {
+        (cy + raw[1]).clamp(ch - dh, 0.0)
+    } else {
+        cy
+    };
+    [clamped_x - cx, clamped_y - cy]
 }
 
 pub fn mouse_to_norm(

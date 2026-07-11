@@ -7,6 +7,8 @@ pub struct DecodedImage {
     pub raw_bytes: Vec<u8>,
 }
 
+// ── Decode ────────────────────────────────────────────
+
 pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     let img = image::load_from_memory(bytes).ok()?;
     let img = img.to_rgba8();
@@ -23,86 +25,28 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
-pub fn extract_exif(bytes: &[u8]) -> String {
-    let ms = match nom_exif::MediaSource::from_memory(bytes.to_vec()) {
-        Ok(ms) => ms,
-        Err(_) => return String::new(),
-    };
-    let mut parser = nom_exif::MediaParser::new();
-    let exif = match parser.parse_exif(ms) {
-        Ok(exif) => nom_exif::Exif::from(exif),
-        Err(_) => return String::new(),
-    };
-    let get = |tag| exif.get(tag);
+// ── Rotation (pure pixel op) ──────────────────────────
 
-    let mut lines = Vec::new();
-
-    // Camera
-    if let Some(v) = get(nom_exif::ExifTag::Make).and_then(|v| v.as_str()) {
-        let model = get(nom_exif::ExifTag::Model)
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if model.is_empty() {
-            lines.push(v.to_string());
-        } else {
-            lines.push(format!("{} {}", v, model));
-        }
-    } else if let Some(v) = get(nom_exif::ExifTag::Model).and_then(|v| v.as_str()) {
-        lines.push(v.to_string());
-    }
-
-    // Lens
-    if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str()) {
-        if !v.is_empty() {
-            lines.push(v.to_string());
+pub fn rotate_rgba_90_cw(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, [usize; 2]) {
+    let mut out = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let src = (y * w + x) * 4;
+            let dst = (x * h + (h - 1 - y)) * 4;
+            out[dst..dst + 4].copy_from_slice(&rgba[src..src + 4]);
         }
     }
-
-    // Aperture
-    if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(|v| v.as_f64()) {
-        lines.push(format!("f/{:.1}", v));
-    } else if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(|v| v.as_urational()) {
-        let f = v.numerator() as f64 / v.denominator() as f64;
-        lines.push(format!("f/{:.1}", f));
-    }
-
-    // Shutter
-    if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(|v| v.as_f64()) {
-        if v < 1.0 {
-            lines.push(format!("1/{}s", (1.0 / v).round() as u32));
-        } else {
-            lines.push(format!("{:.0}s", v));
-        }
-    } else if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(|v| v.as_urational()) {
-        let f = v.numerator() as f64 / v.denominator() as f64;
-        if f < 1.0 {
-            lines.push(format!("1/{}s", (1.0_f64 / f).round() as u32));
-        } else {
-            lines.push(format!("{:.0}s", f));
-        }
-    }
-
-    // ISO
-    if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u32()) {
-        lines.push(format!("ISO {}", v));
-    } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u16()) {
-        lines.push(format!("ISO {}", v));
-    } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_str()) {
-        lines.push(format!("ISO {}", v));
-    }
-
-    // Flash
-    if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_u16()) {
-        lines.push(format!("Flash: {}", if v & 1 != 0 { "On" } else { "Off" }));
-    } else if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_str()) {
-        lines.push(format!("Flash: {}", v));
-    }
-
-    lines.join("\n")
+    (out, [h, w])
 }
 
+// ── Y helpers ─────────────────────────────────────────
+
+const LUMA_R: f32 = 0.299;
+const LUMA_G: f32 = 0.587;
+const LUMA_B: f32 = 0.114;
+
 fn rgba_to_y(rgba: &[u8], idx: usize) -> f32 {
-    0.299 * rgba[idx] as f32 + 0.587 * rgba[idx + 1] as f32 + 0.114 * rgba[idx + 2] as f32
+    LUMA_R * rgba[idx] as f32 + LUMA_G * rgba[idx + 1] as f32 + LUMA_B * rgba[idx + 2] as f32
 }
 
 pub fn compute_y_histogram(rgba: &[u8]) -> [u32; 256] {
@@ -113,6 +57,8 @@ pub fn compute_y_histogram(rgba: &[u8]) -> [u32; 256] {
     }
     hist
 }
+
+// ── Selection stats ───────────────────────────────────
 
 #[derive(Clone, Copy)]
 pub struct AvgStats {
@@ -154,15 +100,91 @@ pub fn compute_selection_stats(rgba: &[u8], w: usize, h: usize, selection: &[f32
 }
 
 pub fn format_cell_label(s: &AvgStats) -> String {
-    let luma = 0.299 * s.r + 0.587 * s.g + 0.114 * s.b;
+    let luma = LUMA_R * s.r + LUMA_G * s.g + LUMA_B * s.b;
     let rg = if s.g > 0.0 { s.r / s.g } else { 0.0 };
     let bg = if s.g > 0.0 { s.b / s.g } else { 0.0 };
     let max = s.r.max(s.g).max(s.b);
     let min = s.r.min(s.g).min(s.b);
     let sat = if max > 0.0 { (max - min) / max } else { 0.0 };
-
     format!(
         "Luma:{:.2}\nR/G:{:.2} B/G:{:.2}\nSat:{:.2}\nR:{:.2} G:{:.2} B:{:.2}",
         luma, rg, bg, sat, s.r, s.g, s.b
     )
+}
+
+// ── EXIF ──────────────────────────────────────────────
+
+fn exif_f64_or_urational(v: &nom_exif::EntryValue) -> Option<f64> {
+    v.as_f64().or_else(|| {
+        v.as_urational()
+            .map(|r| r.numerator() as f64 / r.denominator() as f64)
+    })
+}
+
+pub fn extract_exif(bytes: &[u8]) -> String {
+    let ms = match nom_exif::MediaSource::from_memory(bytes.to_vec()) {
+        Ok(ms) => ms,
+        Err(_) => return String::new(),
+    };
+    let mut parser = nom_exif::MediaParser::new();
+    let exif = match parser.parse_exif(ms) {
+        Ok(exif) => nom_exif::Exif::from(exif),
+        Err(_) => return String::new(),
+    };
+    let get = |tag| exif.get(tag);
+
+    let mut lines = Vec::new();
+
+    // Camera
+    if let Some(v) = get(nom_exif::ExifTag::Make).and_then(|v| v.as_str()) {
+        let model = get(nom_exif::ExifTag::Model)
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if model.is_empty() {
+            lines.push(v.to_string());
+        } else {
+            lines.push(format!("{} {}", v, model));
+        }
+    } else if let Some(v) = get(nom_exif::ExifTag::Model).and_then(|v| v.as_str()) {
+        lines.push(v.to_string());
+    }
+
+    // Lens
+    if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str()) {
+        if !v.is_empty() {
+            lines.push(v.to_string());
+        }
+    }
+
+    // Aperture
+    if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(|v| exif_f64_or_urational(v)) {
+        lines.push(format!("f/{:.1}", v));
+    }
+
+    // Shutter
+    if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(|v| exif_f64_or_urational(v)) {
+        if v < 1.0 {
+            lines.push(format!("1/{}s", (1.0 / v).round() as u32));
+        } else {
+            lines.push(format!("{:.0}s", v));
+        }
+    }
+
+    // ISO
+    if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u32()) {
+        lines.push(format!("ISO {}", v));
+    } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u16()) {
+        lines.push(format!("ISO {}", v));
+    } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_str()) {
+        lines.push(format!("ISO {}", v));
+    }
+
+    // Flash
+    if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_u16()) {
+        lines.push(format!("Flash: {}", if v & 1 != 0 { "On" } else { "Off" }));
+    } else if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_str()) {
+        lines.push(format!("Flash: {}", v));
+    }
+
+    lines.join("\n")
 }
