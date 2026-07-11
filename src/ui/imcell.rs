@@ -85,7 +85,7 @@ pub fn draw_overlay(
         } else {
             egui::Color32::from_rgb(255, 80, 80)
         };
-        ui.painter().rect_stroke(
+        ui.painter().with_clip_rect(cell_rect).rect_stroke(
             sel_rect,
             0.0,
             egui::Stroke::new(1.5, color),

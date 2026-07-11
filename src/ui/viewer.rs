@@ -3,10 +3,16 @@ use eframe::egui;
 use crate::core;
 use crate::state::AppState;
 
-use super::cell;
+use super::imcell;
 
 const SEP: f32 = 1.0;
 const MARGIN: f32 = 6.0;
+
+struct CellSnapshot {
+    idx: usize,
+    cell_rect: egui::Rect,
+    img_size: [usize; 2],
+}
 
 pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize) {
     if loading_count > 0 {
@@ -28,6 +34,8 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             ui.label("P: Local mode");
             ui.label("E: Show EXIF");
             ui.label("H: Show histogram");
+            ui.label("1-8: Rotate image");
+            ui.label("R-click drag: Pan single / Move selection");
             ui.label("Ctrl: Delete / Reorder");
             ui.add_space(12.0);
             ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
@@ -56,6 +64,9 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
     let grid = grid_resp.rect;
 
     let ctrl = ui.input(|i| i.modifiers.ctrl);
+    let mut left_dragged = false;
+    let mut drag_delta_acc = [0.0f32, 0.0f32];
+    let mut snapshots: Vec<CellSnapshot> = Vec::with_capacity(n);
 
     let mut offset = 0;
     for (row_idx, &col_count) in row_layout.iter().enumerate() {
@@ -94,7 +105,6 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             };
             let resp = ui.allocate_rect(cell_rect, sense);
 
-            // Ctrl close button interaction (before image)
             if ctrl {
                 let s = 14.0;
                 let btn = egui::Rect::from_min_size(
@@ -106,21 +116,30 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 }
             }
 
-            // Zoom/pan (non-local, non-ctrl)
-            if !state.local_mode && !ctrl {
-                if resp.hovered() {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        state.zoom = (state.zoom + scroll * 0.005).max(1.0);
-                    }
+            // Zoom
+            if !state.local_mode && !ctrl && resp.hovered() {
+                let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                if scroll != 0.0 {
+                    state.zoom = (state.zoom + scroll * 0.005).max(1.0);
                 }
+            }
+
+            // Pan
+            if !state.local_mode && !ctrl {
                 if resp.dragged_by(egui::PointerButton::Primary) {
                     let delta = resp.drag_delta();
-                    state.pan[0] += delta.x;
-                    state.pan[1] += delta.y;
+                    drag_delta_acc[0] += delta.x;
+                    drag_delta_acc[1] += delta.y;
+                    left_dragged = true;
+                }
+                if resp.dragged_by(egui::PointerButton::Secondary) {
+                    let delta = resp.drag_delta();
+                    state.pan_offset[img_idx][0] += delta.x;
+                    state.pan_offset[img_idx][1] += delta.y;
                 }
                 if state.zoom <= 1.0 {
                     state.pan = [0.0, 0.0];
+                    state.pan_offset.fill([0.0, 0.0]);
                 }
             }
 
@@ -143,20 +162,27 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 }
             }
 
-            // Q-key swap
+            // Q swap
             let compare = state.images.len() == 2 && ui.input(|i| i.key_down(egui::Key::Q));
             let draw_idx = if compare && img_idx == 0 { 1 } else { img_idx };
 
-            handle_drag(state, &resp, img_idx, state.zoom, state.pan);
-            cell::draw_image(
-                ui,
-                &state.images[draw_idx],
-                cell_rect,
-                state.zoom,
-                state.pan,
-            );
+            let cell_pan = [
+                state.pan[0] + state.pan_offset[img_idx][0],
+                state.pan[1] + state.pan_offset[img_idx][1],
+            ];
 
-            // Ctrl visual overlays (on top of image)
+            handle_drag(state, &resp, img_idx, cell_rect, state.zoom, cell_pan, ctrl);
+
+            // ── Draw image ────────────────────────────────
+            snapshots.push(CellSnapshot {
+                idx: img_idx,
+                cell_rect,
+                img_size: state.images[img_idx].size,
+            });
+
+            imcell::draw_image(ui, &state.images[draw_idx], cell_rect, state.zoom, cell_pan);
+
+            // Ctrl visual overlays
             let reorder_active = ctrl && state.reorder_src.is_some();
             if reorder_active {
                 let src = state.reorder_src == Some(img_idx);
@@ -207,13 +233,14 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             }
 
             let label = state.avg_y[img_idx]
-                .map(core::image::format_cell_label)
+                .as_ref()
+                .map(|s| core::image::format_cell_label(s))
                 .unwrap_or_default();
-            cell::draw_overlay(
+            imcell::draw_overlay(
                 ui,
                 cell_rect,
                 &state.images[img_idx],
-                state.selection,
+                state.selection[img_idx],
                 &label,
                 if state.show_exif {
                     &state.exif[img_idx]
@@ -226,7 +253,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                     &[0; 256]
                 },
                 state.zoom,
-                state.pan,
+                cell_pan,
                 state.is_dragging(),
             );
 
@@ -236,7 +263,12 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
         offset += col_count;
     }
 
-    // Process removals
+    if left_dragged {
+        state.pan[0] += drag_delta_acc[0];
+        state.pan[1] += drag_delta_acc[1];
+        apply_clamp_feedback(state, &snapshots);
+    }
+
     if !state.pending_remove.is_empty() {
         let mut indices: Vec<usize> = state.pending_remove.drain(..).collect();
         indices.sort_unstable();
@@ -246,8 +278,86 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 state.remove_image(idx);
             }
         }
-        state.selection = None;
+        state.selection.fill(None);
         state.avg_y.fill(None);
+    }
+}
+
+fn apply_clamp_feedback(state: &mut AppState, snapshots: &[CellSnapshot]) {
+    if state.local_mode || state.zoom <= 1.0 {
+        return;
+    }
+
+    let mut global_adj = [0.0f32, 0.0f32];
+    let mut has_global = false;
+
+    for s in snapshots {
+        let raw = [
+            state.pan[0] + state.pan_offset[s.idx][0],
+            state.pan[1] + state.pan_offset[s.idx][1],
+        ];
+        let img_w = s.img_size[0] as f32;
+        let img_h = s.img_size[1] as f32;
+        let scale = (s.cell_rect.width() / img_w).min(s.cell_rect.height() / img_h) * state.zoom;
+        let dw = img_w * scale;
+        let dh = img_h * scale;
+        let cw = s.cell_rect.width();
+        let ch = s.cell_rect.height();
+        let cx = (cw - dw) / 2.0;
+        let cy = (ch - dh) / 2.0;
+
+        let clamped_x = if dw > cw {
+            (cx + raw[0]).clamp(cw - dw, 0.0)
+        } else {
+            cx
+        };
+        let clamped_y = if dh > ch {
+            (cy + raw[1]).clamp(ch - dh, 0.0)
+        } else {
+            cy
+        };
+        let eff = [clamped_x - cx, clamped_y - cy];
+        let diff = [raw[0] - eff[0], raw[1] - eff[1]];
+
+        if diff[0] == 0.0 && diff[1] == 0.0 {
+            continue;
+        }
+
+        for axis in 0..2 {
+            let d = diff[axis];
+            if d == 0.0 {
+                continue;
+            }
+            let off = state.pan_offset[s.idx][axis];
+            if off == 0.0 {
+                if d.abs() > global_adj[axis].abs() {
+                    global_adj[axis] = d;
+                }
+                has_global = true;
+            } else if off.signum() == d.signum() {
+                let new_off = off - d;
+                if off.signum() == new_off.signum() || new_off == 0.0 {
+                    state.pan_offset[s.idx][axis] = new_off;
+                } else {
+                    state.pan_offset[s.idx][axis] = 0.0;
+                    let rem = d - off;
+                    if rem.abs() > global_adj[axis].abs() {
+                        global_adj[axis] = rem;
+                    }
+                    has_global = true;
+                }
+            } else {
+                if d.abs() > global_adj[axis].abs() {
+                    global_adj[axis] = d;
+                }
+                has_global = true;
+            }
+        }
+    }
+
+    if has_global {
+        state.pan[0] -= global_adj[0];
+        state.pan[1] -= global_adj[1];
     }
 }
 
@@ -271,35 +381,68 @@ fn handle_drag(
     state: &mut AppState,
     resp: &egui::Response,
     img_idx: usize,
+    cell_rect: egui::Rect,
     zoom: f32,
     pan: [f32; 2],
+    ctrl: bool,
 ) {
-    if !state.local_mode || resp.dragged_by(egui::PointerButton::Secondary) {
+    if !state.local_mode || ctrl {
         return;
     }
 
-    if let Some(mouse_pos) = resp.interact_pointer_pos() {
-        if resp.drag_started_by(egui::PointerButton::Primary) {
-            if let Some(norm) =
-                cell::mouse_to_norm(mouse_pos, resp.rect, state.images[img_idx].size, zoom, pan)
-            {
-                state.drag_start(norm);
+    let Some(mouse_pos) = resp.interact_pointer_pos() else {
+        return;
+    };
+
+    let img_size = state.images[img_idx].size;
+
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
+            state.drag_start_new(img_idx, norm);
+        }
+    }
+
+    if resp.dragged_by(egui::PointerButton::Primary)
+        && state.is_dragging()
+        && !state.is_moving_selection()
+    {
+        if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
+            state.drag_update(norm);
+        }
+    }
+
+    if resp.drag_started_by(egui::PointerButton::Secondary) {
+        if state.selection[img_idx].is_some() {
+            if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
+                state.drag_start_move(img_idx, norm);
             }
         }
-
-        if resp.dragged_by(egui::PointerButton::Primary) && state.is_dragging() {
-            if let Some(norm) =
-                cell::mouse_to_norm(mouse_pos, resp.rect, state.images[img_idx].size, zoom, pan)
-            {
-                state.drag_update(norm);
-            }
+    }
+    if resp.dragged_by(egui::PointerButton::Secondary) && state.is_moving_selection() {
+        if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
+            state.drag_update(norm);
         }
     }
 
     if resp.drag_stopped_by(egui::PointerButton::Primary) {
-        if let Some(sel) = state.drag_end() {
-            for (j, img) in state.images.iter().enumerate() {
-                state.avg_y[j] = Some(core::image::compute_avg_y(
+        if let Some(cell) = state.drag_end() {
+            if let Some(sel) = state.selection[cell] {
+                for (j, img) in state.images.iter().enumerate() {
+                    state.avg_y[j] = Some(core::image::compute_selection_stats(
+                        &img.rgba,
+                        img.size[0],
+                        img.size[1],
+                        &sel,
+                    ));
+                }
+            }
+        }
+    }
+    if resp.drag_stopped_by(egui::PointerButton::Secondary) {
+        if let Some(cell) = state.drag_end() {
+            if let Some(sel) = state.selection[cell] {
+                let img = &state.images[cell];
+                state.avg_y[cell] = Some(core::image::compute_selection_stats(
                     &img.rgba,
                     img.size[0],
                     img.size[1],

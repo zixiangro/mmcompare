@@ -114,26 +114,55 @@ pub fn compute_y_histogram(rgba: &[u8]) -> [u32; 256] {
     hist
 }
 
-pub fn compute_avg_y(rgba: &[u8], w: usize, h: usize, selection: &[f32; 4]) -> f32 {
+#[derive(Clone, Copy)]
+pub struct AvgStats {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+}
+
+pub fn compute_selection_stats(rgba: &[u8], w: usize, h: usize, selection: &[f32; 4]) -> AvgStats {
     let x1 = (selection[0] * w as f32) as usize;
     let y1 = (selection[1] * h as f32) as usize;
     let x2 = ((selection[2] * w as f32) as usize).min(w - 1);
     let y2 = ((selection[3] * h as f32) as usize).min(h - 1);
     if x1 >= x2 || y1 >= y2 {
-        return 0.0;
+        return AvgStats {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+        };
     }
-    let mut sum = 0f64;
+    let mut r_sum = 0u64;
+    let mut g_sum = 0u64;
+    let mut b_sum = 0u64;
     let mut count = 0u64;
     for y in y1..=y2 {
         for x in x1..=x2 {
             let idx = (y * w + x) * 4;
-            sum += rgba_to_y(rgba, idx) as f64;
+            r_sum += rgba[idx] as u64;
+            g_sum += rgba[idx + 1] as u64;
+            b_sum += rgba[idx + 2] as u64;
             count += 1;
         }
     }
-    (sum / count as f64) as f32
+    AvgStats {
+        r: r_sum as f32 / count as f32 / 255.0,
+        g: g_sum as f32 / count as f32 / 255.0,
+        b: b_sum as f32 / count as f32 / 255.0,
+    }
 }
 
-pub fn format_cell_label(y: f32) -> String {
-    format!("Avg Y: {:.1}", y)
+pub fn format_cell_label(s: &AvgStats) -> String {
+    let luma = 0.299 * s.r + 0.587 * s.g + 0.114 * s.b;
+    let rg = if s.g > 0.0 { s.r / s.g } else { 0.0 };
+    let bg = if s.g > 0.0 { s.b / s.g } else { 0.0 };
+    let max = s.r.max(s.g).max(s.b);
+    let min = s.r.min(s.g).min(s.b);
+    let sat = if max > 0.0 { (max - min) / max } else { 0.0 };
+
+    format!(
+        "Luma:{:.2}\nR/G:{:.2} B/G:{:.2}\nSat:{:.2}\nR:{:.2} G:{:.2} B:{:.2}",
+        luma, rg, bg, sat, s.r, s.g, s.b
+    )
 }

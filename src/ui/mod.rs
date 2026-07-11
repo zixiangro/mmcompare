@@ -1,3 +1,3 @@
-pub mod cell;
+pub mod imcell;
 pub mod viewer;
 pub mod widgets;

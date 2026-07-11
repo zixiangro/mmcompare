@@ -118,11 +118,9 @@ impl MmCompare {
 
         if self.loading_received >= self.loading_total {
             let mut decoded = std::mem::take(&mut self.loading_buf);
-            // Sort by original index to preserve file order
             decoded.sort_by_key(|(i, _)| *i);
             let decoded: Vec<_> = decoded.into_iter().map(|(_, d)| d).collect();
 
-            // Compute EXIF and histogram from decoded data
             let mut exif = Vec::with_capacity(decoded.len());
             let mut histogram = Vec::with_capacity(decoded.len());
 
@@ -145,6 +143,7 @@ impl MmCompare {
                         size: d.size,
                         rgba: d.rgba,
                         path: d.path,
+                        rotation: 0,
                     }
                 })
                 .collect();
@@ -163,7 +162,7 @@ impl MmCompare {
 
 impl eframe::App for MmCompare {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        // Toggle modes: P=local, E=exif, H=histogram
+        // ── Mode toggles ──────────────────────────────────
         let toggle = |key| ui.input(|i| i.key_pressed(key));
         let mut changed = false;
 
@@ -171,7 +170,7 @@ impl eframe::App for MmCompare {
             self.state.local_mode = !self.state.local_mode;
             changed = true;
             if !self.state.local_mode {
-                self.state.selection = None;
+                self.state.selection.fill(None);
                 self.state.avg_y.fill(None);
             }
         }
@@ -182,6 +181,23 @@ impl eframe::App for MmCompare {
         if toggle(egui::Key::H) {
             self.state.show_histogram = !self.state.show_histogram;
             changed = true;
+        }
+
+        // ── Rotation: keys 1-8 ────────────────────────────
+        let num_keys = [
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+        ];
+        for (idx, &key) in num_keys.iter().enumerate() {
+            if ui.input(|i| i.key_pressed(key)) && idx < self.state.images.len() {
+                self.state.rotate_image(idx, ui.ctx());
+            }
         }
 
         if changed {
