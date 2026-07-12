@@ -32,6 +32,42 @@ impl MmCompare {
         self.load_rx.is_some()
     }
 
+    pub fn load_startup_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        let remaining = 8usize.saturating_sub(self.state.images.len());
+        let mut paths: Vec<_> = paths
+            .into_iter()
+            .filter(|p| {
+                !self.state.loaded_paths.contains(p)
+                    && p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| {
+                            matches!(
+                                e.to_ascii_lowercase().as_str(),
+                                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
+                            )
+                        })
+                        .unwrap_or(false)
+            })
+            .take(remaining)
+            .collect();
+
+        if paths.is_empty() {
+            return;
+        }
+
+        paths.sort_by(|a, b| {
+            let na = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let nb = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            na.to_lowercase().cmp(&nb.to_lowercase())
+        });
+
+        for p in &paths {
+            self.state.loaded_paths.insert(p.clone());
+        }
+
+        self.spawn_loaders(paths, ctx);
+    }
+
     fn poll_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
