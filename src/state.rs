@@ -10,29 +10,59 @@ pub struct ImageInfo {
     pub path: PathBuf,
 }
 
+pub struct ImageCell {
+    pub info: ImageInfo,
+    pub selection: Option<NormRect>,
+    pub avg_stats: Option<AvgStats>,
+    pub exif: String,
+    pub histogram: [u32; 256],
+}
+
+impl ImageCell {
+    fn from_info(info: ImageInfo, exif: String, histogram: [u32; 256]) -> Self {
+        Self {
+            info,
+            selection: None,
+            avg_stats: None,
+            exif,
+            histogram,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum CellKind {
+    Image(usize), // index into AppState.image_cells
+}
+
 pub type NormRect = [f32; 4];
 
 #[derive(Clone, Copy, PartialEq)]
-enum DragKind {
+pub(crate) enum DragKind {
     NewSelection,
     MoveSelection,
 }
 
 pub struct AppState {
-    pub images: Vec<ImageInfo>,
+    pub image_cells: Vec<ImageCell>,
+    /// Display order of all cells.
+    pub cell_order: Vec<CellKind>,
+
     pub local_mode: bool,
     pub show_exif: bool,
     pub show_histogram: bool,
-    pub selection: Vec<Option<NormRect>>,
-    pub avg_stats: Vec<Option<AvgStats>>,
-    pub exif: Vec<String>,
-    pub histogram: Vec<[u32; 256]>,
+
+    /// Global zoom (image cells only).
     pub zoom: f32,
+    /// Global pan (left-drag, image cells only).
     pub pan: [f32; 2],
+    /// Per-cell pan offset, indexed by cell_order position.
     pub pan_offset: Vec<[f32; 2]>,
+
     pub loaded_paths: HashSet<PathBuf>,
     pub reorder_src: Option<usize>,
     pub pending_remove: Vec<usize>,
+
     drag_origin: Option<[f32; 2]>,
     drag_cell: Option<usize>,
     drag_kind: Option<DragKind>,
@@ -41,14 +71,11 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            images: Vec::new(),
+            image_cells: Vec::new(),
+            cell_order: Vec::new(),
             local_mode: false,
             show_exif: false,
             show_histogram: false,
-            selection: Vec::new(),
-            avg_stats: Vec::new(),
-            exif: Vec::new(),
-            histogram: Vec::new(),
             zoom: 1.0,
             pan: [0.0, 0.0],
             pan_offset: Vec::new(),
@@ -61,23 +88,44 @@ impl AppState {
         }
     }
 
-    pub fn append_images(&mut self, images: Vec<ImageInfo>) {
-        let old_len = self.images.len();
-        let new_len = old_len + images.len();
-        self.images.extend(images);
-        self.avg_stats.resize(new_len, None);
-        self.selection.resize(new_len, None);
-        self.pan_offset.resize(new_len, [0.0, 0.0]);
-        for img in &self.images[old_len..] {
-            self.loaded_paths.insert(img.path.clone());
+    /// Add image cells (from drag/drop or command line).
+    pub fn append_standalone_images(
+        &mut self,
+        infos: Vec<ImageInfo>,
+        exif: Vec<String>,
+        histogram: Vec<[u32; 256]>,
+    ) {
+        let start = self.image_cells.len();
+        for (i, info) in infos.into_iter().enumerate() {
+            self.image_cells
+                .push(ImageCell::from_info(info, exif[i].clone(), histogram[i]));
+            self.cell_order.push(CellKind::Image(start + i));
+            self.pan_offset.push([0.0, 0.0]);
         }
-        self.avg_stats.fill(None);
-        self.selection.fill(None);
+    }
+
+    /// Remove a cell from cell_order.
+    pub fn remove_cell(&mut self, cell_order_pos: usize) {
+        let Some(&CellKind::Image(img_idx)) = self.cell_order.get(cell_order_pos) else {
+            return;
+        };
+        self.loaded_paths
+            .remove(&self.image_cells[img_idx].info.path);
+        self.image_cells.remove(img_idx);
+        for CellKind::Image(idx) in &mut self.cell_order {
+            if *idx > img_idx {
+                *idx -= 1;
+            }
+        }
+        self.cell_order.remove(cell_order_pos);
+        self.pan_offset.remove(cell_order_pos);
     }
 
     pub fn drag_start_new(&mut self, cell: usize, norm: [f32; 2]) {
-        self.selection.iter_mut().for_each(|s| *s = None);
-        self.avg_stats.fill(None);
+        for img in &mut self.image_cells {
+            img.selection = None;
+            img.avg_stats = None;
+        }
         self.drag_origin = Some(norm);
         self.drag_cell = Some(cell);
         self.drag_kind = Some(DragKind::NewSelection);
@@ -99,8 +147,8 @@ impl AppState {
                     origin[0].max(norm[0]),
                     origin[1].max(norm[1]),
                 ];
-                for s in &mut self.selection {
-                    *s = Some(rect);
+                for img in &mut self.image_cells {
+                    img.selection = Some(rect);
                 }
                 true
             }
@@ -108,7 +156,7 @@ impl AppState {
                 if let (Some(cell), Some(origin)) = (self.drag_cell, self.drag_origin) {
                     let dx = norm[0] - origin[0];
                     let dy = norm[1] - origin[1];
-                    if let Some(sel) = &mut self.selection[cell] {
+                    if let Some(sel) = &mut self.image_cells[cell].selection {
                         sel[0] = (sel[0] + dx).clamp(0.0, 1.0);
                         sel[1] = (sel[1] + dy).clamp(0.0, 1.0);
                         sel[2] = (sel[2] + dx).clamp(0.0, 1.0);
@@ -146,22 +194,16 @@ impl AppState {
         self.drag_kind == Some(DragKind::MoveSelection)
     }
 
-    pub fn swap_images(&mut self, a: usize, b: usize) {
-        self.images.swap(a, b);
-        self.avg_stats.swap(a, b);
-        self.exif.swap(a, b);
-        self.histogram.swap(a, b);
-        self.selection.swap(a, b);
+    pub fn swap_cells(&mut self, a: usize, b: usize) {
+        self.cell_order.swap(a, b);
         self.pan_offset.swap(a, b);
     }
 
-    pub fn remove_image(&mut self, idx: usize) {
-        self.loaded_paths.remove(&self.images[idx].path);
-        self.images.remove(idx);
-        self.avg_stats.remove(idx);
-        self.exif.remove(idx);
-        self.histogram.remove(idx);
-        self.selection.remove(idx);
-        self.pan_offset.remove(idx);
+    /// Whether there is at least one cell to render.
+    pub fn is_all_images(&self) -> bool {
+        self.cell_order
+            .iter()
+            .all(|c| matches!(c, CellKind::Image(_)))
+            && !self.cell_order.is_empty()
     }
 }

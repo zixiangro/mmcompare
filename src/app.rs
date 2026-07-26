@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use eframe::egui;
 
 use crate::core;
-use crate::state::{AppState, ImageInfo};
+use crate::state::{AppState, CellKind, ImageInfo};
 use crate::ui;
 
 pub struct MmCompare {
@@ -27,27 +27,28 @@ impl Default for MmCompare {
     }
 }
 
+fn is_image_ext(p: &PathBuf) -> bool {
+    p.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
+            )
+        })
+        .unwrap_or(false)
+}
+
 impl MmCompare {
     fn is_loading(&self) -> bool {
         self.load_rx.is_some()
     }
 
     pub fn load_startup_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        let remaining = 8usize.saturating_sub(self.state.images.len());
+        let remaining = 8usize.saturating_sub(self.state.cell_order.len());
         let mut paths: Vec<_> = paths
             .into_iter()
-            .filter(|p| {
-                !self.state.loaded_paths.contains(p)
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| {
-                            matches!(
-                                e.to_ascii_lowercase().as_str(),
-                                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
-                            )
-                        })
-                        .unwrap_or(false)
-            })
+            .filter(|p| is_image_ext(p) && !self.state.loaded_paths.contains(p))
             .take(remaining)
             .collect();
 
@@ -75,24 +76,13 @@ impl MmCompare {
         }
 
         let remaining = 8usize
-            .saturating_sub(self.state.images.len())
+            .saturating_sub(self.state.cell_order.len())
             .saturating_sub(self.loading_total);
 
         let mut paths: Vec<PathBuf> = dropped
             .into_iter()
             .filter_map(|f| f.path)
-            .filter(|p| {
-                !self.state.loaded_paths.contains(p)
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| {
-                            matches!(
-                                e.to_ascii_lowercase().as_str(),
-                                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
-                            )
-                        })
-                        .unwrap_or(false)
-            })
+            .filter(|p| is_image_ext(p) && !self.state.loaded_paths.contains(p))
             .take(remaining)
             .collect();
 
@@ -157,8 +147,7 @@ impl MmCompare {
 
             let mut exif = Vec::with_capacity(decoded.len());
             let mut histogram = Vec::with_capacity(decoded.len());
-
-            let images: Vec<ImageInfo> = decoded
+            let infos: Vec<ImageInfo> = decoded
                 .into_iter()
                 .map(|d| {
                     exif.push(core::image::extract_exif(&d.raw_bytes));
@@ -181,28 +170,30 @@ impl MmCompare {
                 })
                 .collect();
 
-            self.state.append_images(images);
-            self.state.exif.extend(exif);
-            self.state.histogram.extend(histogram);
+            self.state.append_standalone_images(infos, exif, histogram);
 
             self.load_rx = None;
             self.loading_total = 0;
             self.loading_received = 0;
+
             ctx.request_repaint();
         }
     }
 
-    fn rotate_image(&mut self, idx: usize, ctx: &egui::Context) {
-        let img = &mut self.state.images[idx];
+    fn rotate_image_cell(&mut self, img_idx: usize, ctx: &egui::Context) {
+        let cell = &mut self.state.image_cells[img_idx];
         let (new_rgba, new_size) =
-            core::image::rotate_rgba_90_cw(&img.rgba, img.size[0], img.size[1]);
-        img.rgba = new_rgba;
-        img.size = new_size;
+            core::image::rotate_rgba_90_cw(&cell.info.rgba, cell.info.size[0], cell.info.size[1]);
+        cell.info.rgba = new_rgba;
+        cell.info.size = new_size;
 
-        let color_image =
-            egui::ColorImage::from_rgba_unmultiplied([img.size[0], img.size[1]], &img.rgba);
-        img.texture = ctx.load_texture(
-            img.path
+        let color_image = egui::ColorImage::from_rgba_unmultiplied(
+            [cell.info.size[0], cell.info.size[1]],
+            &cell.info.rgba,
+        );
+        cell.info.texture = ctx.load_texture(
+            cell.info
+                .path
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("image"),
@@ -210,16 +201,16 @@ impl MmCompare {
             egui::TextureOptions::default(),
         );
 
-        if idx < self.state.histogram.len() {
-            self.state.histogram[idx] = core::image::compute_y_histogram(&img.rgba);
-        }
+        cell.histogram = core::image::compute_y_histogram(&cell.info.rgba);
 
         if self.state.local_mode {
-            self.state.selection.fill(None);
-            self.state.avg_stats.fill(None);
+            for img in &mut self.state.image_cells {
+                img.selection = None;
+                img.avg_stats = None;
+            }
         } else {
-            self.state.avg_stats[idx] = None;
-            self.state.selection[idx] = None;
+            cell.avg_stats = None;
+            cell.selection = None;
         }
     }
 }
@@ -229,36 +220,46 @@ impl eframe::App for MmCompare {
         let toggle = |key| ui.input(|i| i.key_pressed(key));
         let mut changed = false;
 
-        if toggle(egui::Key::P) {
-            self.state.local_mode = !self.state.local_mode;
-            changed = true;
-            if !self.state.local_mode {
-                self.state.selection.fill(None);
-                self.state.avg_stats.fill(None);
-            }
-        }
-        if toggle(egui::Key::E) {
-            self.state.show_exif = !self.state.show_exif;
-            changed = true;
-        }
-        if toggle(egui::Key::H) {
-            self.state.show_histogram = !self.state.show_histogram;
-            changed = true;
-        }
+        // Shortcuts only when all cells are image cells
+        let all_images = self.state.is_all_images();
 
-        let num_keys = [
-            egui::Key::Num1,
-            egui::Key::Num2,
-            egui::Key::Num3,
-            egui::Key::Num4,
-            egui::Key::Num5,
-            egui::Key::Num6,
-            egui::Key::Num7,
-            egui::Key::Num8,
-        ];
-        for (idx, &key) in num_keys.iter().enumerate() {
-            if ui.input(|i| i.key_pressed(key)) && idx < self.state.images.len() {
-                self.rotate_image(idx, ui.ctx());
+        if all_images {
+            if toggle(egui::Key::P) {
+                self.state.local_mode = !self.state.local_mode;
+                changed = true;
+                if !self.state.local_mode {
+                    for img in &mut self.state.image_cells {
+                        img.selection = None;
+                        img.avg_stats = None;
+                    }
+                }
+            }
+            if toggle(egui::Key::E) {
+                self.state.show_exif = !self.state.show_exif;
+                changed = true;
+            }
+            if toggle(egui::Key::H) {
+                self.state.show_histogram = !self.state.show_histogram;
+                changed = true;
+            }
+
+            let num_keys = [
+                egui::Key::Num1,
+                egui::Key::Num2,
+                egui::Key::Num3,
+                egui::Key::Num4,
+                egui::Key::Num5,
+                egui::Key::Num6,
+                egui::Key::Num7,
+                egui::Key::Num8,
+            ];
+            for (i, &key) in num_keys.iter().enumerate() {
+                if ui.input(|i| i.key_pressed(key)) {
+                    if i < self.state.cell_order.len() {
+                        let CellKind::Image(img_idx) = self.state.cell_order[i];
+                        self.rotate_image_cell(img_idx, ui.ctx());
+                    }
+                }
             }
         }
 
