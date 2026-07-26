@@ -171,13 +171,15 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 state.pan[1] + state.pan_offset[img_idx][1],
             ];
 
-            handle_drag(state, &resp, img_idx, cell_rect, state.zoom, cell_pan, ctrl);
+            handle_drag(
+                state, &resp, draw_idx, cell_rect, state.zoom, cell_pan, ctrl,
+            );
 
             // ── Draw image ────────────────────────────────
             snapshots.push(CellSnapshot {
                 idx: img_idx,
                 cell_rect,
-                img_size: state.images[img_idx].size,
+                img_size: state.images[draw_idx].size,
             });
 
             imcell::draw_image(ui, &state.images[draw_idx], cell_rect, state.zoom, cell_pan);
@@ -232,23 +234,23 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 );
             }
 
-            let label = state.avg_stats[img_idx]
+            let label = state.avg_stats[draw_idx]
                 .as_ref()
                 .map(|s| core::image::format_cell_label(s))
                 .unwrap_or_default();
             imcell::draw_overlay(
                 ui,
                 cell_rect,
-                &state.images[img_idx],
-                state.selection[img_idx],
+                &state.images[draw_idx],
+                state.selection[draw_idx],
                 &label,
                 if state.show_exif {
-                    &state.exif[img_idx]
+                    &state.exif[draw_idx]
                 } else {
                     ""
                 },
                 if state.show_histogram {
-                    &state.histogram[img_idx]
+                    &state.histogram[draw_idx]
                 } else {
                     &[0; 256]
                 },

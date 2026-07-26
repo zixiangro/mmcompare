@@ -122,69 +122,68 @@ fn exif_f64_or_urational(v: &nom_exif::EntryValue) -> Option<f64> {
 }
 
 pub fn extract_exif(bytes: &[u8]) -> String {
-    let ms = match nom_exif::MediaSource::from_memory(bytes.to_vec()) {
-        Ok(ms) => ms,
-        Err(_) => return String::new(),
-    };
-    let mut parser = nom_exif::MediaParser::new();
-    let exif = match parser.parse_exif(ms) {
-        Ok(exif) => nom_exif::Exif::from(exif),
-        Err(_) => return String::new(),
-    };
-    let get = |tag| exif.get(tag);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let ms = nom_exif::MediaSource::from_memory(bytes.to_vec()).ok()?;
+        let mut parser = nom_exif::MediaParser::new();
+        let exif = parser.parse_exif(ms).ok()?;
+        let exif = nom_exif::Exif::from(exif);
+        let get = |tag| exif.get(tag);
 
-    let mut lines = Vec::new();
+        let mut lines = Vec::new();
 
-    // Camera
-    if let Some(v) = get(nom_exif::ExifTag::Make).and_then(|v| v.as_str()) {
-        let model = get(nom_exif::ExifTag::Model)
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        if model.is_empty() {
-            lines.push(v.to_string());
-        } else {
-            lines.push(format!("{} {}", v, model));
-        }
-    } else if let Some(v) = get(nom_exif::ExifTag::Model).and_then(|v| v.as_str()) {
-        lines.push(v.to_string());
-    }
-
-    // Lens
-    if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str()) {
-        if !v.is_empty() {
+        // Camera
+        if let Some(v) = get(nom_exif::ExifTag::Make).and_then(|v| v.as_str()) {
+            let model = get(nom_exif::ExifTag::Model)
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if model.is_empty() {
+                lines.push(v.to_string());
+            } else {
+                lines.push(format!("{} {}", v, model));
+            }
+        } else if let Some(v) = get(nom_exif::ExifTag::Model).and_then(|v| v.as_str()) {
             lines.push(v.to_string());
         }
-    }
 
-    // Aperture
-    if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(|v| exif_f64_or_urational(v)) {
-        lines.push(format!("f/{:.1}", v));
-    }
-
-    // Shutter
-    if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(|v| exif_f64_or_urational(v)) {
-        if v < 1.0 {
-            lines.push(format!("1/{}s", (1.0 / v).round() as u32));
-        } else {
-            lines.push(format!("{:.0}s", v));
+        // Lens
+        if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str()) {
+            if !v.is_empty() {
+                lines.push(v.to_string());
+            }
         }
-    }
 
-    // ISO
-    if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u32()) {
-        lines.push(format!("ISO {}", v));
-    } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u16()) {
-        lines.push(format!("ISO {}", v));
-    } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_str()) {
-        lines.push(format!("ISO {}", v));
-    }
+        // Aperture
+        if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(|v| exif_f64_or_urational(v)) {
+            lines.push(format!("f/{:.1}", v));
+        }
 
-    // Flash
-    if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_u16()) {
-        lines.push(format!("Flash: {}", if v & 1 != 0 { "On" } else { "Off" }));
-    } else if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_str()) {
-        lines.push(format!("Flash: {}", v));
-    }
+        // Shutter
+        if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(|v| exif_f64_or_urational(v))
+        {
+            if v < 1.0 {
+                lines.push(format!("1/{}s", (1.0 / v).round() as u32));
+            } else {
+                lines.push(format!("{:.0}s", v));
+            }
+        }
 
-    lines.join("\n")
+        // ISO
+        if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u32()) {
+            lines.push(format!("ISO {}", v));
+        } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u16()) {
+            lines.push(format!("ISO {}", v));
+        } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_str()) {
+            lines.push(format!("ISO {}", v));
+        }
+
+        // Flash
+        if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_u16()) {
+            lines.push(format!("Flash: {}", if v & 1 != 0 { "On" } else { "Off" }));
+        } else if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_str()) {
+            lines.push(format!("Flash: {}", v));
+        }
+
+        Some(lines.join("\n"))
+    }));
+    result.unwrap_or_default().unwrap_or_default()
 }
