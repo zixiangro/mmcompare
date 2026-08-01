@@ -84,6 +84,7 @@ pub fn mouse_to_norm(
     ])
 }
 
+#[allow(clippy::too_many_arguments)] // 纯绘制函数，扁平参数便于调用方直接传 state 字段
 pub fn draw_overlay(
     ui: &mut egui::Ui,
     cell_rect: egui::Rect,

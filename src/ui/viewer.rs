@@ -1,7 +1,9 @@
+use std::path::PathBuf;
+
 use eframe::egui;
 
 use crate::core;
-use crate::state::{AppState, CellKind};
+use crate::state::{AppState, CellKind, MAX_IMAGES};
 
 use super::imcell;
 
@@ -14,26 +16,46 @@ struct CellSnapshot {
     img_size: [usize; 2],
 }
 
+/// 网格布局的只读快照，避免在渲染函数间传递一堆散参数。
+struct GridLayout {
+    row_layout: Vec<usize>,
+    grid: egui::Rect,
+    cell_w: f32,
+    row_h: f32,
+    inter: f32,
+}
+
+/// 渲染期间累积的平移反馈，帧末统一应用到 state。
+struct PanFeedback {
+    left_dragged: bool,
+    drag_delta_acc: [f32; 2],
+    snapshots: Vec<CellSnapshot>,
+}
+
 pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize) {
     if loading_count > 0 {
-        ui.vertical_centered(|ui| {
-            ui.label(format!("Loading {} image(s)...", loading_count));
-        });
+        // 解码线程完成时依赖持续重绘来收结果。
         ui.ctx().request_repaint();
-        return;
     }
 
     if state.cell_order.is_empty() {
         ui.vertical_centered(|ui| {
             ui.add_space(ui.available_height() / 3.0);
-            ui.label(egui::RichText::new("MMCompare").size(24.0).strong());
-            ui.add_space(12.0);
-            ui.label("Drag images here to view  (max 8)");
-            ui.add_space(6.0);
-            ui.label("P: Local mode   E: EXIF   H: Histogram");
-            ui.label("1-8: Rotate   Q: Compare   Ctrl: Reorder");
-            ui.add_space(12.0);
-            ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
+            if loading_count > 0 {
+                ui.label(format!("Loading {} image(s)...", loading_count));
+            } else {
+                ui.label(egui::RichText::new("MMCompare").size(24.0).strong());
+                ui.add_space(12.0);
+                ui.label(format!("Drag images here to view  (max {})", MAX_IMAGES));
+                ui.add_space(6.0);
+                ui.label("P: Local mode   E: EXIF   H: Histogram");
+                ui.label(format!(
+                    "1-{}: Rotate   Q: Compare   Ctrl: Reorder",
+                    MAX_IMAGES
+                ));
+                ui.add_space(12.0);
+                ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
+            }
         });
         return;
     }
@@ -45,7 +67,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
     let row_layout = match n {
         1..=3 => vec![n],
         4 => vec![2, 2],
-        _ => vec![(n + 1) / 2, n / 2],
+        _ => vec![n.div_ceil(2), n / 2],
     };
 
     let max_cols = *row_layout.iter().max().unwrap_or(&1) as f32;
@@ -56,44 +78,54 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
 
     let total_h = rows * row_h + (rows - 1.0) * SEP;
     let (_, grid_resp) = ui.allocate_exact_size(egui::vec2(avail.x, total_h), egui::Sense::hover());
-    let grid = grid_resp.rect;
+    let layout = GridLayout {
+        row_layout,
+        grid: grid_resp.rect,
+        cell_w,
+        row_h,
+        inter,
+    };
 
     let ctrl = ui.input(|i| i.modifiers.ctrl);
     let all_images = state.is_all_images();
-    let mut left_dragged = false;
-    let mut drag_delta_acc = [0.0f32, 0.0f32];
-    let mut snapshots: Vec<CellSnapshot> = Vec::with_capacity(n);
+    let mut feedback = PanFeedback {
+        left_dragged: false,
+        drag_delta_acc: [0.0, 0.0],
+        snapshots: Vec::with_capacity(n),
+    };
 
     let mut offset = 0;
-    for (row_idx, &col_count) in row_layout.iter().enumerate() {
-        let row_top = grid.top() + row_idx as f32 * (row_h + SEP);
+    for (row_idx, &col_count) in layout.row_layout.iter().enumerate() {
+        let row_top = layout.grid.top() + row_idx as f32 * (layout.row_h + SEP);
 
         if row_idx > 0 {
             let sr = egui::Rect::from_min_size(
-                egui::pos2(grid.left(), row_top - SEP),
+                egui::pos2(layout.grid.left(), row_top - SEP),
                 egui::vec2(avail.x, SEP),
             );
             ui.painter().rect_filled(sr, 0.0, sep_color);
             ui.allocate_rect(sr, egui::Sense::hover());
         }
 
-        let row_content = col_count as f32 * cell_w + (col_count - 1) as f32 * inter;
-        let mut x = grid.left() + (avail.x - row_content) / 2.0;
+        let row_content = col_count as f32 * layout.cell_w + (col_count - 1) as f32 * layout.inter;
+        let mut x = layout.grid.left() + (avail.x - row_content) / 2.0;
 
         for i in 0..col_count {
             let cell_pos = offset + i;
 
             if i > 0 {
-                x = paint_zone(ui, x, row_top, row_h, MARGIN, None);
-                x = paint_zone(ui, x, row_top, row_h, SEP, Some(sep_color));
-                x = paint_zone(ui, x, row_top, row_h, MARGIN, None);
+                x = paint_zone(ui, x, row_top, layout.row_h, MARGIN, None);
+                x = paint_zone(ui, x, row_top, layout.row_h, SEP, Some(sep_color));
+                x = paint_zone(ui, x, row_top, layout.row_h, MARGIN, None);
             }
 
-            let cell_rect =
-                egui::Rect::from_min_size(egui::pos2(x, row_top), egui::vec2(cell_w, row_h));
+            let cell_rect = egui::Rect::from_min_size(
+                egui::pos2(x, row_top),
+                egui::vec2(layout.cell_w, layout.row_h),
+            );
 
             let Some(&CellKind::Image(img_idx)) = state.cell_order.get(cell_pos) else {
-                x += cell_w;
+                x += layout.cell_w;
                 continue;
             };
 
@@ -105,26 +137,20 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 img_idx,
                 ctrl,
                 all_images,
-                &mut left_dragged,
-                &mut drag_delta_acc,
-                &mut snapshots,
-                &row_layout,
-                grid,
-                cell_w,
-                row_h,
-                inter,
+                &layout,
+                &mut feedback,
             );
 
-            x += cell_w;
+            x += layout.cell_w;
         }
 
         offset += col_count;
     }
 
-    if all_images && left_dragged {
-        state.pan[0] += drag_delta_acc[0];
-        state.pan[1] += drag_delta_acc[1];
-        apply_clamp_feedback(state, &snapshots);
+    if all_images && feedback.left_dragged {
+        state.pan[0] += feedback.drag_delta_acc[0];
+        state.pan[1] += feedback.drag_delta_acc[1];
+        apply_clamp_feedback(state, &feedback.snapshots);
     }
 
     if !state.pending_remove.is_empty() {
@@ -151,8 +177,60 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 .send_viewport_cmd(egui::ViewportCommand::Title("MMCompare".to_string()));
         }
     }
+
+    // 加载进度 / 失败提示画在网格最上层，不遮挡已有图片。
+    draw_status_banner(ui, layout.grid, loading_count, &state.load_errors);
 }
 
+/// 网格顶部居中显示加载进度与上次加载的失败项。
+fn draw_status_banner(
+    ui: &mut egui::Ui,
+    grid: egui::Rect,
+    loading_count: usize,
+    errors: &[PathBuf],
+) {
+    let mut lines: Vec<String> = Vec::new();
+    if loading_count > 0 {
+        lines.push(format!("Loading {} image(s)...", loading_count));
+    }
+    for p in errors {
+        lines.push(format!("Failed: {}", p.display()));
+    }
+    if lines.is_empty() {
+        return;
+    }
+
+    let font = egui::FontId::monospace(12.0);
+    let (w, h) = ui.fonts_mut(|f| {
+        let mut w = 0.0f32;
+        let mut h = 0.0f32;
+        for line in &lines {
+            let sz = f
+                .layout_no_wrap(line.clone(), font.clone(), egui::Color32::WHITE)
+                .size();
+            w = w.max(sz.x);
+            h += sz.y + 3.0;
+        }
+        (w, h)
+    });
+    let pad = 8.0;
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(grid.center().x, grid.top() + pad + h / 2.0),
+        egui::vec2(w + pad * 2.0, h + pad),
+    );
+    ui.painter()
+        .rect_filled(rect, 4.0, egui::Color32::from_black_alpha(180));
+    ui.painter().text(
+        rect.min + egui::vec2(pad, pad / 2.0),
+        egui::Align2::LEFT_TOP,
+        lines.join("\n"),
+        font,
+        egui::Color32::WHITE,
+    );
+    ui.allocate_rect(rect, egui::Sense::hover());
+}
+
+#[allow(clippy::too_many_arguments)]
 fn render_image_cell(
     ui: &mut egui::Ui,
     state: &mut AppState,
@@ -161,18 +239,10 @@ fn render_image_cell(
     img_idx: usize,
     ctrl: bool,
     all_images: bool,
-    left_dragged: &mut bool,
-    drag_delta_acc: &mut [f32; 2],
-    snapshots: &mut Vec<CellSnapshot>,
-    row_layout: &[usize],
-    grid: egui::Rect,
-    cell_w: f32,
-    row_h: f32,
-    inter: f32,
+    layout: &GridLayout,
+    feedback: &mut PanFeedback,
 ) {
-    let sense = if ctrl {
-        egui::Sense::drag()
-    } else if state.local_mode || state.zoom > 1.0 {
+    let sense = if ctrl || state.local_mode || state.zoom > 1.0 {
         egui::Sense::drag()
     } else {
         egui::Sense::hover()
@@ -202,9 +272,9 @@ fn render_image_cell(
     if !state.local_mode && !ctrl && all_images {
         if resp.dragged_by(egui::PointerButton::Primary) {
             let delta = resp.drag_delta();
-            drag_delta_acc[0] += delta.x;
-            drag_delta_acc[1] += delta.y;
-            *left_dragged = true;
+            feedback.drag_delta_acc[0] += delta.x;
+            feedback.drag_delta_acc[1] += delta.y;
+            feedback.left_dragged = true;
         }
         if resp.dragged_by(egui::PointerButton::Secondary) {
             let delta = resp.drag_delta();
@@ -222,15 +292,12 @@ fn render_image_cell(
         if resp.drag_started_by(egui::PointerButton::Primary) {
             state.reorder_src = Some(cell_pos);
         }
-        if resp.drag_stopped_by(egui::PointerButton::Primary) {
-            if let Some(src) = state.reorder_src.take() {
-                let hover_pos = ui.input(|i| i.pointer.hover_pos());
-                if let Some(dst) = find_cell_at(hover_pos, row_layout, grid, cell_w, row_h, inter) {
-                    if src != dst {
-                        state.swap_cells(src, dst);
-                    }
-                }
-            }
+        if resp.drag_stopped_by(egui::PointerButton::Primary)
+            && let Some(src) = state.reorder_src.take()
+            && let Some(dst) = find_cell_at(ui.input(|i| i.pointer.hover_pos()), layout)
+            && src != dst
+        {
+            state.swap_cells(src, dst);
         }
     }
 
@@ -247,7 +314,7 @@ fn render_image_cell(
     handle_drag(state, &resp, img_idx, cell_rect, state.zoom, cell_pan, ctrl);
 
     let img_size = state.image_cells[draw_idx].info.size;
-    snapshots.push(CellSnapshot {
+    feedback.snapshots.push(CellSnapshot {
         pos: cell_pos,
         cell_rect,
         img_size,
@@ -266,7 +333,7 @@ fn render_image_cell(
     let label = cell
         .avg_stats
         .as_ref()
-        .map(|s| core::image::format_cell_label(s))
+        .map(core::image::format_cell_label)
         .unwrap_or_default();
     imcell::draw_overlay(
         ui,
@@ -274,9 +341,9 @@ fn render_image_cell(
         &cell.info,
         cell.selection,
         &label,
-        if state.show_exif { &cell.exif } else { "" },
+        if state.show_exif { &cell.info.exif } else { "" },
         if state.show_histogram {
-            &cell.histogram
+            &cell.info.histogram
         } else {
             &[0; 256]
         },
@@ -286,24 +353,21 @@ fn render_image_cell(
     );
 
     // Ctrl visuals — drawn on top of everything
-    let reorder_active = ctrl && state.reorder_src.is_some();
-    if reorder_active {
+    if ctrl && state.reorder_src.is_some() {
         let src = state.reorder_src == Some(cell_pos);
         let dst = !src
             && ui
                 .input(|i| i.pointer.hover_pos())
-                .map_or(false, |hp| cell_rect.contains(hp));
-        if src {
+                .is_some_and(|hp| cell_rect.contains(hp));
+        if src || dst {
             ui.painter().rect_filled(
                 cell_rect,
                 0.0,
-                egui::Color32::from_rgba_premultiplied(0, 0, 0, 60),
-            );
-        } else if dst {
-            ui.painter().rect_filled(
-                cell_rect,
-                0.0,
-                egui::Color32::from_rgba_premultiplied(0, 0, 0, 40),
+                if src {
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 60)
+                } else {
+                    egui::Color32::from_rgba_premultiplied(0, 0, 0, 40)
+                },
             );
         }
     }
@@ -393,10 +457,8 @@ fn apply_clamp_feedback(state: &mut AppState, snapshots: &[CellSnapshot]) {
                     }
                     has_global = true;
                 }
-            } else {
-                if d.abs() > global_adj[axis].abs() {
-                    global_adj[axis] = d;
-                }
+            } else if d.abs() > global_adj[axis].abs() {
+                global_adj[axis] = d;
                 has_global = true;
             }
         }
@@ -425,90 +487,82 @@ fn handle_drag(
 
     let img_size = state.image_cells[img_idx].info.size;
 
-    if resp.drag_started_by(egui::PointerButton::Primary) {
-        if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
-            state.drag_start_new(img_idx, norm);
-        }
+    if resp.drag_started_by(egui::PointerButton::Primary)
+        && let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan)
+    {
+        state.drag_start_new(img_idx, norm);
     }
     if resp.dragged_by(egui::PointerButton::Primary)
         && state.is_dragging()
         && !state.is_moving_selection()
+        && let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan)
     {
-        if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
-            state.drag_update(norm);
-        }
+        state.drag_update(norm);
     }
-    if resp.drag_started_by(egui::PointerButton::Secondary) {
-        if state.image_cells[img_idx].selection.is_some() {
-            if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
-                state.drag_start_move(img_idx, norm);
-            }
-        }
+    if resp.drag_started_by(egui::PointerButton::Secondary)
+        && state.image_cells[img_idx].selection.is_some()
+        && let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan)
+    {
+        state.drag_start_move(img_idx, norm);
     }
-    if resp.dragged_by(egui::PointerButton::Secondary) && state.is_moving_selection() {
-        if let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan) {
-            state.drag_update(norm);
-        }
+    if resp.dragged_by(egui::PointerButton::Secondary)
+        && state.is_moving_selection()
+        && let Some(norm) = imcell::mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan)
+    {
+        state.drag_update(norm);
     }
 
-    if resp.drag_stopped_by(egui::PointerButton::Primary) {
-        if let Some(cell) = state.drag_end() {
-            if let Some(sel) = state.image_cells[cell].selection {
-                for img in &mut state.image_cells {
-                    img.avg_stats = Some(core::image::compute_selection_stats(
-                        &img.info.rgba,
-                        img.info.size[0],
-                        img.info.size[1],
-                        &sel,
-                    ));
-                }
-            }
+    if resp.drag_stopped_by(egui::PointerButton::Primary)
+        && let Some(cell) = state.drag_end()
+        && let Some(sel) = state.image_cells[cell].selection
+    {
+        for img in &mut state.image_cells {
+            img.avg_stats = Some(core::image::compute_selection_stats(
+                &img.info.rgba,
+                img.info.size[0],
+                img.info.size[1],
+                &sel,
+            ));
         }
     }
-    if resp.drag_stopped_by(egui::PointerButton::Secondary) {
-        if let Some(cell) = state.drag_end() {
-            if let Some(sel) = state.image_cells[cell].selection {
-                let img = &state.image_cells[cell];
-                let stats = core::image::compute_selection_stats(
-                    &img.info.rgba,
-                    img.info.size[0],
-                    img.info.size[1],
-                    &sel,
-                );
-                state.image_cells[cell].avg_stats = Some(stats);
-            }
-        }
+    if resp.drag_stopped_by(egui::PointerButton::Secondary)
+        && let Some(cell) = state.drag_end()
+        && let Some(sel) = state.image_cells[cell].selection
+    {
+        let stats = core::image::compute_selection_stats(
+            &state.image_cells[cell].info.rgba,
+            state.image_cells[cell].info.size[0],
+            state.image_cells[cell].info.size[1],
+            &sel,
+        );
+        state.image_cells[cell].avg_stats = Some(stats);
     }
 }
 
-fn find_cell_at(
-    pos: Option<egui::Pos2>,
-    row_layout: &[usize],
-    grid: egui::Rect,
-    cell_w: f32,
-    row_h: f32,
-    inter: f32,
-) -> Option<usize> {
+fn find_cell_at(pos: Option<egui::Pos2>, layout: &GridLayout) -> Option<usize> {
     let pos = pos?;
     let mut idx = 0usize;
-    for (row_idx, &col_count) in row_layout.iter().enumerate() {
-        let row_top = grid.top() + row_idx as f32 * (row_h + SEP);
+    for (row_idx, &col_count) in layout.row_layout.iter().enumerate() {
+        let row_top = layout.grid.top() + row_idx as f32 * (layout.row_h + SEP);
         let row_rect = egui::Rect::from_min_size(
-            egui::pos2(grid.left(), row_top),
-            egui::vec2(grid.width(), row_h),
+            egui::pos2(layout.grid.left(), row_top),
+            egui::vec2(layout.grid.width(), layout.row_h),
         );
         if !row_rect.contains(pos) {
             idx += col_count;
             continue;
         }
-        let row_content = col_count as f32 * cell_w + (col_count - 1) as f32 * inter;
-        let mut x = row_rect.left() + (grid.width() - row_content) / 2.0;
+        let row_content = col_count as f32 * layout.cell_w + (col_count - 1) as f32 * layout.inter;
+        let mut x = row_rect.left() + (layout.grid.width() - row_content) / 2.0;
         for _ in 0..col_count {
-            let cr = egui::Rect::from_min_size(egui::pos2(x, row_top), egui::vec2(cell_w, row_h));
+            let cr = egui::Rect::from_min_size(
+                egui::pos2(x, row_top),
+                egui::vec2(layout.cell_w, layout.row_h),
+            );
             if cr.contains(pos) {
                 return Some(idx);
             }
-            x += cell_w + inter;
+            x += layout.cell_w + layout.inter;
             idx += 1;
         }
     }

@@ -3,29 +3,34 @@ use std::path::PathBuf;
 
 use crate::core::image::AvgStats;
 
+/// 单幅图片可同时显示的硬上限。
+///
+/// 由布局决定（最多两行、每行 4 列），同时也是键盘旋转快捷键的数量。
+pub const MAX_IMAGES: usize = 8;
+
 pub struct ImageInfo {
     pub texture: eframe::egui::TextureHandle,
     pub size: [usize; 2],
     pub rgba: Vec<u8>,
     pub path: PathBuf,
+    /// EXIF 摘要文本（空串表示无 EXIF 或解析失败），在解码线程中生成。
+    pub exif: String,
+    /// Y 亮度直方图，在解码线程中生成。
+    pub histogram: [u32; 256],
 }
 
 pub struct ImageCell {
     pub info: ImageInfo,
     pub selection: Option<NormRect>,
     pub avg_stats: Option<AvgStats>,
-    pub exif: String,
-    pub histogram: [u32; 256],
 }
 
 impl ImageCell {
-    fn from_info(info: ImageInfo, exif: String, histogram: [u32; 256]) -> Self {
+    fn from_info(info: ImageInfo) -> Self {
         Self {
             info,
             selection: None,
             avg_stats: None,
-            exif,
-            histogram,
         }
     }
 }
@@ -62,6 +67,8 @@ pub struct AppState {
     pub loaded_paths: HashSet<PathBuf>,
     pub reorder_src: Option<usize>,
     pub pending_remove: Vec<usize>,
+    /// 最近一次加载失败的路径，在下一次加载开始时清空。
+    pub load_errors: Vec<PathBuf>,
 
     drag_origin: Option<[f32; 2]>,
     drag_cell: Option<usize>,
@@ -82,6 +89,7 @@ impl AppState {
             loaded_paths: HashSet::new(),
             reorder_src: None,
             pending_remove: Vec::new(),
+            load_errors: Vec::new(),
             drag_origin: None,
             drag_cell: None,
             drag_kind: None,
@@ -89,16 +97,10 @@ impl AppState {
     }
 
     /// Add image cells (from drag/drop or command line).
-    pub fn append_standalone_images(
-        &mut self,
-        infos: Vec<ImageInfo>,
-        exif: Vec<String>,
-        histogram: Vec<[u32; 256]>,
-    ) {
+    pub fn append_standalone_images(&mut self, infos: Vec<ImageInfo>) {
         let start = self.image_cells.len();
         for (i, info) in infos.into_iter().enumerate() {
-            self.image_cells
-                .push(ImageCell::from_info(info, exif[i].clone(), histogram[i]));
+            self.image_cells.push(ImageCell::from_info(info));
             self.cell_order.push(CellKind::Image(start + i));
             self.pan_offset.push([0.0, 0.0]);
         }

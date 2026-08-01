@@ -4,7 +4,6 @@ pub struct DecodedImage {
     pub rgba: Vec<u8>,
     pub size: [usize; 2],
     pub path: PathBuf,
-    pub raw_bytes: Vec<u8>,
 }
 
 // ── Decode ────────────────────────────────────────────
@@ -21,7 +20,6 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
         rgba,
         size,
         path: PathBuf::new(),
-        raw_bytes: Vec::new(),
     })
 }
 
@@ -146,20 +144,19 @@ pub fn extract_exif(bytes: &[u8]) -> String {
         }
 
         // Lens
-        if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str()) {
-            if !v.is_empty() {
-                lines.push(v.to_string());
-            }
+        if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str())
+            && !v.is_empty()
+        {
+            lines.push(v.to_string());
         }
 
         // Aperture
-        if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(|v| exif_f64_or_urational(v)) {
+        if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(exif_f64_or_urational) {
             lines.push(format!("f/{:.1}", v));
         }
 
         // Shutter
-        if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(|v| exif_f64_or_urational(v))
-        {
+        if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(exif_f64_or_urational) {
             if v < 1.0 {
                 lines.push(format!("1/{}s", (1.0 / v).round() as u32));
             } else {
