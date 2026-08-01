@@ -1,5 +1,7 @@
 # egui 0.35 API 备忘
 
+> 状态: 参考 | 更新: 2026-07-31 | 变更触发点: egui 版本升级、踩到新的 API 坑时追加
+
 ## 相比旧版的 Breaking Changes
 
 | 旧 API | 新 API (0.35) |

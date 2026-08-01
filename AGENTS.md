@@ -1,110 +1,123 @@
 # AGENTS.md — mmcompare
 
-## 项目概述
+> 工程手册：本文件是仓库入口，包含项目速览、工程规范与文档导航。
+> 详细技术内容一律在 [docs/README.md](docs/README.md)（文档地图），本文件不重复展开。
 
-图片对比工具，基于 egui/eframe 的桌面应用。
-当前阶段：多图查看器，支持选择框同步 + 亮度对比。
+## 1. 项目概览
 
-## 技术栈
+图片对比桌面应用（egui/eframe）：多图查看（1-8 张）、选择框同步亮度对比、缩放/平移、EXIF 摘要、直方图、旋转、重排、删除、双图对比。
 
-- **GUI**: eframe 0.35 (wgpu 后端) + egui 0.35
-- **图片解码**: `image` crate 0.25
-- **日志**: env_logger
-- **线程**: 仅 `std::thread::spawn` + `std::sync::mpsc`
+| 领域 | 选型 |
+|---|---|
+| GUI | eframe 0.35 (wgpu) + egui 0.35 |
+| 图片解码 | `image` 0.25 |
+| EXIF | nom-exif 3.6 |
+| 日志 | env_logger + log |
+| 线程 | 仅 `std::thread::spawn` + `std::sync::mpsc` |
 
-## 项目结构
+## 2. 文档导航
+
+**入口：[docs/README.md](docs/README.md)**（文档矩阵 + 维护规则）。结构：
 
 ```
-src/
-├── main.rs          # 入口，初始化 eframe
-├── app.rs           # eframe::App 实现 + 编排层
-├── state.rs         # 全局状态（ImageInfo, AppState, 选择状态）
-├── core/
-│   ├── mod.rs
-│   └── image.rs     # 图片解码（纯函数，线程安全）
-├── ui/
-    ├── mod.rs
-    ├── viewer.rs    # 布局引擎：算位置 + 分隔线
-    ├── cell.rs      # 图片渲染：居中画图 + 选择覆盖层 + 亮度计算
-    └── widgets.rs   # 通用组件（预留）
+docs/
+├── README.md          # 文档地图：索引 + 状态矩阵 + 变更触发点
+├── architecture.md    # 系统架构：分层、数据流、模块职责
+├── loading.md         # 图片加载管线（线程模型、失败处理）
+├── layout.md          # 布局引擎：网格算法、坐标计算
+├── local-mode.md      # 局部模式：选择框、归一化坐标
+├── egui-api.md        # egui 0.35 API 差异备忘（参考）
+└── decisions/         # ADR 架构决策记录（含模板）
+    ├── 0001-single-threaded-model.md   # 单线程心智模型
+    ├── 0002-manual-layout.md           # 手动坐标布局
+    ├── 0003-loading-pipeline.md        # 加载管线分工
+    └── 0004-module-separation.md       # 模块边界
 ```
 
-## 架构原则
+## 3. 工程规范
 
-### 1. 单线程心智模型
-除了图片解码，全部在主线程运行。多线程代码**物理隔离**在 `app.rs` 的 `poll_drops`/`spawn_loaders`/`poll_loading` 方法中。子线程用完即弃，线程间仅通过 `mpsc::channel` 通信。无 `Arc<Mutex<>>`、无全局线程池。
+### 3.1 架构分层（ADR-0004）
 
-### 2. 前后端分层
-- **ui/**: 只读取 state，渲染界面
-- **core/**: 纯数据处理，不含任何 GUI 依赖
-- **app.rs**: 薄编排层，串联 core → state → ui
-- **state.rs**: 纯数据结构，不含逻辑
+```
+core/   纯数据处理，零 GUI 依赖（解码、旋转、直方图、统计、标签、EXIF）
+state.rs 纯数据结构，只有状态与状态转移薄方法
+ui/     只读 state 渲染；交互结果写入 state，不直接改业务状态
+app.rs  薄编排层：加载管线、键盘事件、标题（唯一允许线程原语的模块）
+```
 
-### 3. 布局与渲染解耦
-- **viewer.rs**: 布局引擎，只负责计算 cell 位置、画分隔线、控制间距。不关心图片怎么画。
-- **cell.rs**: 渲染单元，只负责"给我一个图片+矩形，我居中画出来"。不关心自己在哪里。
+### 3.2 线程模型（ADR-0001）
 
-### 4. 手动精确坐标
-egui 的自动布局（`ui.horizontal`、`item_spacing`、`centered_and_justified`）在需要精确对齐时有各种 edge case。当前 `viewer.rs` 采用完全手动布局：`allocate_exact_size` 预留空间 → `pos2` 计算位置 → `ui.painter()` / `ui.interact()` 精确绘制。
+- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `app.rs` 的 `spawn_loaders`/`poll_loading`/`poll_drops`/`drain_pending_drops`。
+- 子线程用完即弃，线程间仅 `mpsc::channel`。**禁止 `Arc<Mutex<>>`、`RwLock`、线程池**。
+- 重 CPU 计算（解码、EXIF、直方图）必须放子线程；主线程只做纹理上传（ADR-0003）。
 
-## 关键常量
+### 3.3 布局与渲染解耦（ADR-0002/0004）
+
+- `viewer.rs` 布局引擎：只算 cell 位置、画分隔线、编排交互。不关心图片怎么画。
+- `imcell.rs` 渲染单元：只做"图片 + 矩形 → 居中画出来"。不关心自己在哪。
+- 完全手动坐标（`allocate_exact_size` → `pos2` → `painter`/`allocate_rect`），不用自动布局。
+
+### 3.4 代码风格
+
+- 模块/函数/变量：蛇形命名；常量：`SCREAMING_SNAKE`；公共项带 doc comment。
+- 注释用中文，只解释"为什么"（意图、约束、权衡），不解释"是什么"。
+- 交互状态变更集中在帧末统一应用（参考 `viewer.rs` 的 `PanFeedback` 模式），避免渲染中途改状态。
+- clippy 0 警告、`cargo fmt` 通过是提交前提。纯绘制函数参数超限用 `#[allow(clippy::too_many_arguments)]` 并注明理由，不强行拆结构。
+
+### 3.5 错误处理
+
+- 用户可见错误：进 `state.load_errors`（横幅展示），失败路径从 `loaded_paths` 移除以支持重拖重试。
+- 调试信息：`log::warn!` / `log::debug!`（env_logger 已初始化）。
+- 第三方解析器可能 panic（nom-exif）：用 `catch_unwind` 兜底，返回空结果。
+
+### 3.6 依赖管理
+
+- 新增依赖需在 PR 说明理由；优先 `std` 与已有依赖。
+- `egui`/`eframe`/`egui_extras` 版本必须三者一致（当前 0.35）。
+- 升级 egui 后同步检查 [docs/egui-api.md](docs/egui-api.md)。
+
+### 3.7 关键常量
 
 | 常量 | 值 | 说明 |
 |---|---|---|
+| `MAX_IMAGES` (state.rs) | 8 | 图片硬上限，同时决定数字键旋转数量 |
 | `SEP` (viewer.rs) | 1.0 | 分隔线粗细 |
 | `MARGIN` (viewer.rs) | 6.0 | 竖线两侧间距 & 窗口边缘留白 |
 
-## 图片加载流程
+## 4. 开发工作流
 
-```
-用户拖拽文件到窗口 → poll_drops() 取 dropped_files → 过滤图片格式
-→ 每张图起一个临时线程解码 → 主线程每帧 try_recv 收图片
-→ 收齐后上传 GPU 纹理 → 显示
-```
+1. **改代码**：遵循第 3 节规范。
+2. **验证**（提交前必须全部通过）：
+   ```powershell
+   cargo check --all-targets
+   cargo clippy --all-targets   # 0 警告
+   cargo fmt --check
+   cargo build
+   ```
+3. **同步文档**：按 [docs/README.md](docs/README.md) 的"变更触发点"检查命中项并更新；涉及架构决策先更新对应 ADR（模板在 [docs/decisions/README.md](docs/decisions/README.md)）。
+4. **提交**：短主语（≤50 字符，祈使句，不加句号），必要时 72 列正文说明"为什么"。参考个人 AGENTS.md 的 commit 规范。
 
-拖拽文件走 `append=true`（追加而非替换）。
+## 5. 快捷键与交互速查
 
-## 布局规则
+| 键 | 功能 |
+|---|---|
+| `P` | 局部模式：拖拽框选（归一化同步所有 cell）；右键移动选择框 |
+| `E` / `H` | 切换 EXIF 摘要 / 直方图显示 |
+| `1-8` | 旋转对应位置图片（顺时针 90°） |
+| `Q` | 按住：两张图时互换显示（对比） |
+| 滚轮 | 全局缩放（图片模式下） |
+| 左键拖拽 | 缩放 >1 时全局平移；局部模式下为框选 |
+| 右键拖拽 | 单 cell 平移 |
+| `Ctrl` | 显示删除按钮 + 拖拽重排 |
+
+## 6. 布局规则
 
 | 图片数 | 布局 |
 |---|---|
-| 1-3 | 单行，等宽均分，左右 6px margin |
-| 4 | 首行 2 + 次行 2，1px 横线分隔 |
-| 5 | 首行 3 + 次行 2 |
-| 6 | 首行 3 + 次行 3 |
-| 7 | 首行 4 + 次行 3 |
-| 8 | 首行 4 + 次行 4 |
+| 1-3 | 单行等宽（左右 6px margin） |
+| 4 | 2 + 2 |
+| 5 / 6 | 3+2 / 3+3 |
+| 7 / 8 | 4+3 / 4+4 |
 
-所有 cell 统一尺寸（按最大列数计算），行内居中，行间距仅 1px 分隔线无 margin。
-
-## 局部模式 (Local Mode)
-
-按 `P` 切换。拖拽框选区域，归一化坐标 [0..1] 同步到所有 cell。
-松手后 `core::image::compute_avg_y()` 计算每张图选择区域的平均亮度（BT.601 luma）。
-标签文本由 `core::image::format_cell_label()` 生成（core 负责内容格式）。
-状态管理在 `state.rs`：`local_mode`, `selection`, `avg_y`, `drag_origin`。
-
-## egui 0.35 API 注意事项
-
-相比旧版有较多 breaking changes：
-- `TopBottomPanel` → `Panel::top()` / `Panel::bottom()`
-- `SidePanel` → `Panel::left()` / `Panel::right()`
-- `menu::bar()` → `MenuBar::new().ui(ui, ...)`
-- `menu_button()` → `menu::MenuButton::new().ui(ui, ...)`
-- `.show(ctx, ...)` → `.show(ui, ...)` （参数从 `&Context` 变为 `&mut Ui`）
-- `ui.close_menu()` → `ui.close()`
-- `drag_released_by()` → `drag_stopped_by()`
-- `allocate_exact_size` 返回 `(Id, Response)`，rect 通过 `response.rect` 获取
-- `rect_stroke()` 多了 `StrokeKind` 参数
-- `MenuButton` 在 `egui::menu::` 下，不在顶层
-- `with_drag_and_drop(true)` 启用文件拖拽
-
-## 文档
-
-| 文件 | 内容 |
-|---|---|
-| `docs/architecture.md` | 分层、数据流、模块职责 |
-| `docs/layout.md` | 网格布局算法、坐标计算 |
-| `docs/threading.md` | 线程模型、加载管线 |
-| `docs/local-mode.md` | 局部模式、归一化坐标、亮度计算 |
-| `docs/egui-api.md` | egui 0.35 与旧版差异详情 |
+所有 cell 统一尺寸（按最大列数），行内居中，行间仅 1px 分隔线。
+加载中网格正常渲染，顶部叠加半透明状态横幅（进度 + 失败列表），不整屏遮挡。

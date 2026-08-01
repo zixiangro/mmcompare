@@ -1,5 +1,7 @@
 # 局部模式 (Local Mode)
 
+> 状态: 稳定 | 更新: 2026-07-31 | 关联: [architecture.md](architecture.md) · [layout.md](layout.md)
+
 ## 触发
 
 按 `P` 键切换。`app.rs` 检测 `Key::P`，toggle `state.local_mode`。
@@ -7,9 +9,10 @@
 ## 选择框交互
 
 1. **进入局部模式**：所有 cell 的 `Sense` 从 `hover()` 切换为 `drag()`
-2. **拖拽开始**：记录起始鼠标位置，`cell::mouse_to_norm()` 转为归一化坐标 `[x, y]`（0..1）
+2. **拖拽开始**：记录起始鼠标位置，`imcell::mouse_to_norm()` 转为归一化坐标 `[x, y]`（0..1）
 3. **拖拽中**：实时更新 `state.selection`，框为**蓝色**
-4. **松手**：框确定，计算平均亮度，框变为**红色**
+4. **松手**：框确定，计算 RGB 均值，框变为**红色**
+5. **右键拖拽**：移动已有选择框（`DragKind::MoveSelection`）
 
 ## 归一化坐标
 
@@ -20,29 +23,32 @@
 ```
 鼠标位置 → cell 坐标 → image_display_rect 坐标 → 归一化 [0..1]
 
-mouse_to_norm(mouse_pos, cell_rect, img_size):
-  1. image_display_rect() 算图片在 cell 中的实际区域
+mouse_to_norm(mouse_pos, cell_rect, img_size, zoom, pan):
+  1. image_display_rect() 算图片在 cell 中的实际区域（含缩放/平移）
   2. (mouse - img_rect.min) / img_rect.size → [0..1]
 ```
 
 ## 平均亮度计算
 
-`cell::compute_avg_y(img, selection)`：
+`core::image::compute_selection_stats(rgba, w, h, selection)`：
 
 1. 归一化坐标 → 像素坐标
 2. 遍历选择区域内所有像素
-3. Y = 0.299R + 0.587G + 0.114B (BT.601 luma)
-4. 求均值
+3. 分别累加 R / G / B，求均值（归一化到 0..1）
+
+标签文本由 `core::image::format_cell_label(stats)` 生成：
+Luma（BT.601 加权）、R/G、B/G、饱和度、RGB 分量。
 
 ## 状态结构
 
 ```rust
 AppState {
-    images: Vec<ImageInfo>,     // 图片数据（含 rgba 像素）
-    local_mode: bool,           // 是否在局部模式
-    selection: Option<[f32;4]>, // 归一化选择框
-    avg_y: Vec<Option<f32>>,    // 每张图的平均亮度
-    drag_origin: Option<[f32;2]>, // 拖拽起始归一化坐标
+    image_cells: Vec<ImageCell>,   // 图片数据（info + selection + avg_stats）
+    cell_order: Vec<CellKind>,     // 显示顺序
+    local_mode: bool,              // 是否在局部模式
+    drag_origin: Option<[f32;2]>,  // 拖拽起始归一化坐标
+    drag_cell: Option<usize>,      // 拖拽所在 cell
+    drag_kind: Option<DragKind>,   // NewSelection / MoveSelection
 }
 ```
 
@@ -51,6 +57,7 @@ AppState {
 | 文件 | 职责 |
 |---|---|
 | `app.rs` | 按 P 切换模式 |
-| `viewer.rs` | 局部模式下用 `Sense::drag()`，处理拖拽事件 |
-| `cell.rs` | `draw_overlay()` 画框和文字，`compute_avg_y()` 像素采样，`mouse_to_norm()` 坐标转换 |
-| `state.rs` | `drag_start/drag_update/drag_end` 状态管理 |
+| `viewer.rs` | 局部模式下用 `Sense::drag()`，`handle_drag()` 编排拖拽事件 |
+| `imcell.rs` | `draw_overlay()` 画框和文字，`mouse_to_norm()` 坐标转换 |
+| `state.rs` | `drag_start_new/drag_start_move/drag_update/drag_end` 状态管理 |
+| `core/image.rs` | `compute_selection_stats()` 像素采样，`format_cell_label()` 标签格式化 |

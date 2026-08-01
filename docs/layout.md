@@ -1,12 +1,14 @@
 # 布局引擎
 
+> 状态: 稳定 | 更新: 2026-07-31 | 关联: [ADR-0002](decisions/0002-manual-layout.md) · [ADR-0004](decisions/0004-module-separation.md)
+
 ## 概述
 
 `viewer.rs` 是纯布局引擎，不包含任何图片绘制代码。它负责：
 1. 根据图片数量决定行列数
 2. 计算统一的 cell 尺寸
 3. 摆放分隔线和 margin
-4. 委托 `cell.rs` 渲染每个格子的内容
+4. 委托 `imcell.rs` 渲染每个格子的内容
 
 ## 常量
 
@@ -61,4 +63,4 @@ cell 交互用 `ui.interact(cell_rect, id, Sense::drag())`，直接指定 `cell_
 
 ## 为什么不用 egui 自动布局
 
-`ui.horizontal` 在每个元素后自动加 `item_spacing`（包括最后一个），导致右侧不对称。`centered_and_justified` 会消费全部可用高度，导致多行布局失败。手动坐标完全可控。
+`ui.horizontal` 在每个元素后自动加 `item_spacing`（包括最后一个），导致右侧不对称。`centered_and_justified` 会消费全部可用高度，导致多行布局失败。手动坐标完全可控。决策背景详见 [ADR-0002](decisions/0002-manual-layout.md)。
