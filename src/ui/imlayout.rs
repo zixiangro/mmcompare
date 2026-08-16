@@ -25,14 +25,42 @@ use std::sync::mpsc;
 use eframe::egui;
 
 use crate::core;
-use crate::state::{AppState, CellKind, FolderAction, ImageInfo, ImageSource, MAX_IMAGES};
+use crate::state::{
+    AppState, CellKind, FolderAction, ImageInfo, ImageSource, MAX_IMAGES, MAX_VIDEOS, VideoCell,
+};
 
-use super::{folder, imcell};
+use super::{folder, imcell, video};
 
 const SEP: f32 = 1.0;
 const MARGIN: f32 = 6.0;
+/// 视频解码最长边（M2 降采样上限，控制帧内存与传输；M5 再按需调整）。
+const MAX_VIDEO_DIM: u32 = 1280;
+
+/// 视频解码线程 → 主线程的消息（按 path 关联 cell，防下标漂移）。
+enum VideoMsg {
+    Frame {
+        path: PathBuf,
+        pts: f64,
+        rgb: Vec<u8>,
+        width: u32,
+        height: u32,
+    },
+    Done {
+        path: PathBuf,
+    },
+    Error {
+        path: PathBuf,
+    },
+}
+
+/// 一个活跃的视频解码会话（播放流或单帧 seek）。
+struct VideoSession {
+    path: PathBuf,
+    rx: mpsc::Receiver<VideoMsg>,
+}
 
 type LoadResult = Result<(core::image::DecodedImage, String, [u32; 256]), PathBuf>;
+type VideoLoadResult = Result<(core::video::VideoInfo, Vec<u8>), PathBuf>;
 
 pub struct MmCompare {
     state: AppState,
@@ -41,6 +69,11 @@ pub struct MmCompare {
     loading_received: usize,
     loading_buf: Vec<Option<ImageInfo>>,
     pending_drops: Vec<PathBuf>,
+    video_load_rx: Option<mpsc::Receiver<(usize, PathBuf, VideoLoadResult)>>,
+    video_loading_total: usize,
+    video_loading_received: usize,
+    video_loading_buf: Vec<Option<VideoCell>>,
+    video_sessions: Vec<VideoSession>,
     folder: folder::FolderManager,
 }
 
@@ -53,6 +86,11 @@ impl Default for MmCompare {
             loading_received: 0,
             loading_buf: Vec::new(),
             pending_drops: Vec::new(),
+            video_load_rx: None,
+            video_loading_total: 0,
+            video_loading_received: 0,
+            video_loading_buf: Vec::new(),
+            video_sessions: Vec::new(),
             folder: folder::FolderManager::default(),
         }
     }
@@ -64,13 +102,58 @@ impl MmCompare {
         self.load_rx.is_some()
     }
 
-    /// 把输入路径分类为图片文件与文件夹（去重、排序、标记、截断名额），
+    /// 把输入路径分类为图片文件、文件夹与视频文件（去重、排序、截断名额），
     /// 文件路径立即标记进 `loaded_paths`，避免同批重复入队。
     ///
-    /// **模式互斥**：文件夹模式（已有目录/扫描队列）拒绝文件，
-    /// 文件模式（已有图片/加载中）拒绝目录；未定时按批次内容定模式
-    /// （同批混合时目录优先）。两种模式的逻辑不交互。
-    fn classify_paths(&mut self, paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    /// **模式互斥**：视频批（含视频文件）优先——进入/保持视频模式并清空图片与
+    /// 文件夹（M2 简化切换，M3 改为保留状态）；图片/文件夹批则清空视频回图片模式。
+    /// 文件夹模式（已有目录/扫描队列）拒绝文件，文件模式拒绝目录；同批混合时目录优先。
+    fn classify_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+    ) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
+        let batch_has_video = paths.iter().any(|p| !p.is_dir() && folder::is_video_ext(p));
+        let in_video_mode = !self.state.video_cells.is_empty() || self.video_loading_total > 0;
+
+        if batch_has_video {
+            if !in_video_mode {
+                self.state.clear_images_and_folders();
+                self.load_rx = None;
+                self.loading_total = 0;
+                self.loading_received = 0;
+                self.loading_buf.clear();
+                self.pending_drops.clear();
+                self.folder = folder::FolderManager::default();
+            }
+            let remaining = MAX_VIDEOS
+                .saturating_sub(self.state.video_cells.len())
+                .saturating_sub(self.video_loading_total);
+            let mut video_paths = Vec::new();
+            for p in paths {
+                if video_paths.len() >= remaining {
+                    break;
+                }
+                if !p.is_dir() && folder::is_video_ext(&p) && !self.state.loaded_paths.contains(&p)
+                {
+                    video_paths.push(p);
+                }
+            }
+            folder::sort_paths(&mut video_paths);
+            for p in &video_paths {
+                self.state.loaded_paths.insert(p.clone());
+            }
+            return (Vec::new(), Vec::new(), video_paths);
+        }
+
+        if in_video_mode {
+            self.state.clear_videos();
+            self.video_sessions.clear();
+            self.video_load_rx = None;
+            self.video_loading_total = 0;
+            self.video_loading_received = 0;
+            self.video_loading_buf.clear();
+        }
+
         let remaining = MAX_IMAGES
             .saturating_sub(self.state.cell_order.len())
             .saturating_sub(self.loading_total);
@@ -101,11 +184,14 @@ impl MmCompare {
         for p in &file_paths {
             self.state.loaded_paths.insert(p.clone());
         }
-        (file_paths, folder_paths)
+        (file_paths, folder_paths, Vec::new())
     }
 
     pub fn load_startup_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        let (file_paths, folder_paths) = self.classify_paths(paths);
+        let (file_paths, folder_paths, video_paths) = self.classify_paths(paths);
+        if !video_paths.is_empty() {
+            self.spawn_video_loaders(video_paths, ctx);
+        }
         if !file_paths.is_empty() {
             self.spawn_loaders(file_paths, ctx);
         }
@@ -124,7 +210,12 @@ impl MmCompare {
             return;
         }
         let paths = dropped.into_iter().filter_map(|f| f.path).collect();
-        let (file_paths, folder_paths) = self.classify_paths(paths);
+        let (file_paths, folder_paths, video_paths) = self.classify_paths(paths);
+        if !video_paths.is_empty() && self.video_loading_total > 0 {
+            self.pending_drops.extend(video_paths);
+        } else if !video_paths.is_empty() {
+            self.spawn_video_loaders(video_paths, ctx);
+        }
         if !file_paths.is_empty() && self.is_busy() {
             self.pending_drops.extend(file_paths);
         } else if !file_paths.is_empty() {
@@ -135,14 +226,17 @@ impl MmCompare {
         }
     }
 
-    /// 加载完成后，把缓存中的图片文件启动为新一批（重新分类：
+    /// 加载完成后，把缓存中的文件启动为新一批（重新分类：
     /// 缓存期间格子可能已被删除/加满，名额变了）。
     fn drain_pending_drops(&mut self, ctx: &egui::Context) {
-        if self.is_busy() || self.pending_drops.is_empty() {
+        if self.is_busy() || self.video_loading_total > 0 || self.pending_drops.is_empty() {
             return;
         }
         let paths = std::mem::take(&mut self.pending_drops);
-        let (file_paths, _folder_paths) = self.classify_paths(paths);
+        let (file_paths, _folder_paths, video_paths) = self.classify_paths(paths);
+        if !video_paths.is_empty() {
+            self.spawn_video_loaders(video_paths, ctx);
+        }
         if !file_paths.is_empty() {
             self.spawn_loaders(file_paths, ctx);
         }
@@ -223,6 +317,230 @@ impl MmCompare {
             self.load_rx = None;
             self.loading_total = 0;
             self.loading_received = 0;
+            ctx.request_repaint();
+        }
+    }
+
+    /// 启动一批视频首帧加载：每视频一个线程，`read_info` + 首帧提取（降采样）。
+    fn spawn_video_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+        self.video_loading_total = paths.len();
+        self.video_loading_received = 0;
+        self.video_loading_buf = (0..paths.len()).map(|_| None).collect();
+        self.state.load_errors.clear();
+        let (tx, rx) = mpsc::channel();
+
+        for (i, p) in paths.into_iter().enumerate() {
+            let tx = tx.clone();
+            let wpath = p.clone();
+            std::thread::spawn(move || {
+                let result: VideoLoadResult = (|| {
+                    let (info, rgb) =
+                        core::video::first_frame(&wpath, MAX_VIDEO_DIM).map_err(|e| {
+                            log::warn!("video first frame failed {}: {}", wpath.display(), e);
+                            wpath.clone()
+                        })?;
+                    Ok((info, rgb))
+                })();
+                tx.send((i, p, result)).ok();
+            });
+        }
+        drop(tx);
+
+        self.video_load_rx = Some(rx);
+        ctx.request_repaint();
+    }
+
+    /// 每帧把已完成的首帧解码搬进 state，收齐后按序追加视频 cell。
+    fn poll_video_loading(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.video_load_rx else {
+            return;
+        };
+
+        while let Ok((i, path, result)) = rx.try_recv() {
+            match result {
+                Ok((info, rgb)) => {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("video");
+                    let texture = imcell::upload_texture(
+                        ctx,
+                        &rgb,
+                        [info.width as usize, info.height as usize],
+                        name,
+                    );
+                    self.video_loading_buf[i] = Some(VideoCell {
+                        path,
+                        info,
+                        texture: Some(texture),
+                        playing: false,
+                        position_secs: 0.0,
+                        frame_pts: 0.0,
+                        failed: false,
+                    });
+                }
+                Err(path) => {
+                    self.state.loaded_paths.remove(&path);
+                    self.state.load_errors.push(path);
+                }
+            }
+            self.video_loading_received += 1;
+        }
+
+        if self.video_loading_received >= self.video_loading_total {
+            let buf = std::mem::take(&mut self.video_loading_buf);
+            let cells: Vec<VideoCell> = buf.into_iter().flatten().collect();
+            self.state.append_videos(cells);
+
+            self.video_load_rx = None;
+            self.video_loading_total = 0;
+            self.video_loading_received = 0;
+            ctx.request_repaint();
+        }
+    }
+
+    /// 启动一个视频解码会话：`continuous=false` 解码单帧（暂停时 seek/步进），
+    /// `continuous=true` 按帧率持续发帧（播放）。帧通道 rx 被主线程丢弃时线程退出。
+    fn spawn_video_worker(&mut self, cell_idx: usize, from_secs: f64, continuous: bool) {
+        let path = self.state.video_cells[cell_idx].path.clone();
+        self.video_sessions.retain(|s| s.path != path);
+        let (tx, rx) = mpsc::channel();
+        let wpath = path.clone();
+        std::thread::spawn(move || {
+            let mut dec = match core::video::VideoDecoder::open(&wpath, MAX_VIDEO_DIM) {
+                Ok(d) => d,
+                Err(e) => {
+                    log::warn!("video open failed {}: {}", wpath.display(), e);
+                    let _ = tx.send(VideoMsg::Error { path: wpath });
+                    return;
+                }
+            };
+            let frame_dur = dec.frame_duration();
+            let play_result = dec.play(from_secs, |frame| {
+                let ok = tx.send(VideoMsg::Frame {
+                    path: wpath.clone(),
+                    pts: frame.pts_secs,
+                    rgb: frame.rgb,
+                    width: frame.width,
+                    height: frame.height,
+                });
+                if ok.is_err() {
+                    return false;
+                }
+                if continuous {
+                    std::thread::sleep(std::time::Duration::from_secs_f64(frame_dur));
+                    true
+                } else {
+                    false
+                }
+            });
+            if let Err(e) = play_result {
+                log::warn!("video play failed {}: {}", wpath.display(), e);
+                let _ = tx.send(VideoMsg::Error { path: wpath });
+            } else {
+                let _ = tx.send(VideoMsg::Done { path: wpath });
+            }
+        });
+        self.video_sessions.push(VideoSession { path, rx });
+    }
+
+    fn video_drop_session(&mut self, cell_idx: usize) {
+        let Some(path) = self.state.video_cells.get(cell_idx).map(|c| c.path.clone()) else {
+            return;
+        };
+        self.video_sessions.retain(|s| s.path != path);
+    }
+
+    fn video_seek(&mut self, cell_idx: usize, secs: f64) {
+        let pos = {
+            let cell = &mut self.state.video_cells[cell_idx];
+            cell.position_secs = secs.clamp(0.0, cell.info.duration_secs);
+            cell.position_secs
+        };
+        self.spawn_video_worker(cell_idx, pos, false);
+    }
+
+    fn video_toggle_play(&mut self, cell_idx: usize) {
+        let (playing, pos) = {
+            let cell = &mut self.state.video_cells[cell_idx];
+            let dur = cell.info.duration_secs;
+            cell.playing = !cell.playing;
+            if cell.playing && cell.position_secs >= dur - 0.05 {
+                cell.position_secs = 0.0; // 播完再播：从头开始
+            }
+            (cell.playing, cell.position_secs)
+        };
+        if playing {
+            self.spawn_video_worker(cell_idx, pos, true);
+        } else {
+            self.video_drop_session(cell_idx);
+        }
+    }
+
+    /// 每帧搬视频解码帧进 state；会话结束（worker 退出）时移除。
+    fn poll_video(&mut self, ctx: &egui::Context) {
+        let mut keep: Vec<VideoSession> = Vec::new();
+        for session in std::mem::take(&mut self.video_sessions) {
+            let mut alive = false;
+            loop {
+                match session.rx.try_recv() {
+                    Ok(VideoMsg::Frame {
+                        path,
+                        pts,
+                        rgb,
+                        width,
+                        height,
+                    }) => {
+                        alive = true;
+                        if let Some(idx) =
+                            self.state.video_cells.iter().position(|c| c.path == path)
+                        {
+                            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("video");
+                            let cell = &mut self.state.video_cells[idx];
+                            cell.texture = Some(imcell::upload_texture(
+                                ctx,
+                                &rgb,
+                                [width as usize, height as usize],
+                                name,
+                            ));
+                            cell.frame_pts = pts;
+                            if cell.playing {
+                                cell.position_secs = pts;
+                            }
+                            cell.failed = false;
+                        }
+                    }
+                    Ok(VideoMsg::Done { path }) => {
+                        if let Some(idx) =
+                            self.state.video_cells.iter().position(|c| c.path == path)
+                        {
+                            let cell = &mut self.state.video_cells[idx];
+                            if cell.playing {
+                                cell.playing = false;
+                                cell.position_secs = cell.frame_pts;
+                            }
+                        }
+                    }
+                    Ok(VideoMsg::Error { path }) => {
+                        if let Some(idx) =
+                            self.state.video_cells.iter().position(|c| c.path == path)
+                        {
+                            let cell = &mut self.state.video_cells[idx];
+                            cell.playing = false;
+                            cell.failed = true;
+                        }
+                        self.state.load_errors.push(path);
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        alive = false;
+                        break;
+                    }
+                }
+            }
+            if alive {
+                keep.push(session);
+            }
+        }
+        self.video_sessions = keep;
+        if !self.video_sessions.is_empty() {
             ctx.request_repaint();
         }
     }
@@ -336,6 +654,9 @@ impl eframe::App for MmCompare {
 
         if changed {
             let mut flags = String::new();
+            if self.state.is_all_videos() {
+                flags.push('V');
+            }
             if self.state.show_exif {
                 flags.push('E');
             }
@@ -356,6 +677,8 @@ impl eframe::App for MmCompare {
 
         self.poll_drops(ui.ctx());
         self.poll_loading(ui.ctx());
+        self.poll_video_loading(ui.ctx());
+        self.poll_video(ui.ctx());
         self.folder.poll_scan(&mut self.state);
         self.folder.poll_loading(&mut self.state, ui.ctx());
         self.folder.poll_thumbnails(&mut self.state, ui.ctx());
@@ -363,13 +686,24 @@ impl eframe::App for MmCompare {
         self.folder.drain_thumbnails(&mut self.state, ui.ctx());
 
         egui::CentralPanel::default().show(ui, |ui| {
-            let actions = image_grid(
+            let (actions, video_actions) = image_grid(
                 ui,
                 &mut self.state,
                 self.loading_total - self.loading_received,
+                self.video_loading_total - self.video_loading_received,
             );
             for action in actions {
                 self.folder.handle_action(&mut self.state, action, ui.ctx());
+            }
+            for (cell_pos, action) in video_actions {
+                let Some(&CellKind::Video(video_idx)) = self.state.cell_order.get(cell_pos) else {
+                    continue;
+                };
+                match action {
+                    video::VideoAction::TogglePlay => self.video_toggle_play(video_idx),
+                    video::VideoAction::Seek(secs) => self.video_seek(video_idx, secs),
+                    video::VideoAction::None => {}
+                }
             }
         });
     }
@@ -399,8 +733,9 @@ pub fn image_grid(
     ui: &mut egui::Ui,
     state: &mut AppState,
     loading_count: usize,
-) -> Vec<FolderAction> {
-    if loading_count > 0 {
+    video_loading_count: usize,
+) -> (Vec<FolderAction>, Vec<(usize, video::VideoAction)>) {
+    if loading_count > 0 || video_loading_count > 0 {
         ui.ctx().request_repaint();
     }
 
@@ -409,6 +744,8 @@ pub fn image_grid(
             ui.add_space(ui.available_height() / 3.0);
             if loading_count > 0 {
                 ui.label(format!("Loading {} image(s)...", loading_count));
+            } else if video_loading_count > 0 {
+                ui.label(format!("Loading {} video(s)...", video_loading_count));
             } else {
                 ui.label(egui::RichText::new("MMCompare").size(24.0).strong());
                 ui.add_space(12.0);
@@ -423,10 +760,15 @@ pub fn image_grid(
                     MAX_IMAGES
                 ));
                 ui.add_space(12.0);
+                ui.label(format!(
+                    "Videos: drag in (max {}), Space: play/pause, arrows: seek/step, Ctrl+arrows: single",
+                    MAX_VIDEOS
+                ));
+                ui.add_space(12.0);
                 ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
             }
         });
-        return Vec::new();
+        return (Vec::new(), Vec::new());
     }
 
     let n = state.cell_order.len();
@@ -463,6 +805,7 @@ pub fn image_grid(
         snapshots: Vec::with_capacity(n),
     };
     let mut folder_actions: Vec<FolderAction> = Vec::new();
+    let mut video_actions: Vec<(usize, video::VideoAction)> = Vec::new();
 
     let mut offset = 0;
     for (row_idx, &col_count) in layout.row_layout.iter().enumerate() {
@@ -534,6 +877,22 @@ pub fn image_grid(
                         folder_actions.push(action);
                     }
                 }
+                CellKind::Video(video_idx) => {
+                    // 视频模式禁删？否——D1：直接拖入的视频用 Ctrl+RMB 关闭
+                    if ctrl
+                        && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+                        && ui
+                            .input(|i| i.pointer.hover_pos())
+                            .is_some_and(|hp| cell_rect.contains(hp))
+                    {
+                        state.pending_remove.push(cell_pos);
+                    }
+                    let action =
+                        video::draw_video_cell(ui, &state.video_cells[video_idx], cell_rect);
+                    if !matches!(action, video::VideoAction::None) {
+                        video_actions.push((cell_pos, action));
+                    }
+                }
             }
 
             x += layout.cell_w;
@@ -546,6 +905,64 @@ pub fn image_grid(
         state.pan[0] += feedback.drag_delta_acc[0];
         state.pan[1] += feedback.drag_delta_acc[1];
         apply_clamp_feedback(state, &feedback.snapshots);
+    }
+
+    if state.is_all_videos() {
+        let (space, left, right, up, down, ctrl) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::ArrowLeft),
+                i.key_pressed(egui::Key::ArrowRight),
+                i.key_pressed(egui::Key::ArrowUp),
+                i.key_pressed(egui::Key::ArrowDown),
+                i.modifiers.ctrl,
+            )
+        });
+        if space || left || right || up || down {
+            // 非 Ctrl 箭头作用于全部视频；Ctrl+箭头只作用于鼠标悬停的视频（D1）
+            let hover_pos = if ctrl {
+                find_cell_at(ui.input(|i| i.pointer.hover_pos()), &layout)
+            } else {
+                None
+            };
+            for (cell_pos, cell_kind) in state.cell_order.iter().copied().enumerate() {
+                let CellKind::Video(video_idx) = cell_kind else {
+                    continue;
+                };
+                if ctrl && hover_pos != Some(cell_pos) {
+                    continue;
+                }
+                let cell = &state.video_cells[video_idx];
+                if space {
+                    video_actions.push((cell_pos, video::VideoAction::TogglePlay));
+                }
+                let step = if cell.info.frame_rate > 0.0 {
+                    1.0 / cell.info.frame_rate
+                } else {
+                    1.0 / 30.0
+                };
+                if left {
+                    video_actions
+                        .push((cell_pos, video::VideoAction::Seek(cell.position_secs - 5.0)));
+                }
+                if right {
+                    video_actions
+                        .push((cell_pos, video::VideoAction::Seek(cell.position_secs + 5.0)));
+                }
+                if up {
+                    video_actions.push((
+                        cell_pos,
+                        video::VideoAction::Seek(cell.position_secs - step),
+                    ));
+                }
+                if down {
+                    video_actions.push((
+                        cell_pos,
+                        video::VideoAction::Seek(cell.position_secs + step),
+                    ));
+                }
+            }
+        }
     }
 
     if !state.pending_remove.is_empty() {
@@ -573,19 +990,29 @@ pub fn image_grid(
         }
     }
 
-    draw_status_banner(ui, layout.grid, loading_count, &state.load_errors);
-    folder_actions
+    draw_status_banner(
+        ui,
+        layout.grid,
+        loading_count,
+        video_loading_count,
+        &state.load_errors,
+    );
+    (folder_actions, video_actions)
 }
 
 fn draw_status_banner(
     ui: &mut egui::Ui,
     grid: egui::Rect,
     loading_count: usize,
+    video_loading_count: usize,
     errors: &[PathBuf],
 ) {
     let mut lines: Vec<String> = Vec::new();
     if loading_count > 0 {
         lines.push(format!("Loading {} image(s)...", loading_count));
+    }
+    if video_loading_count > 0 {
+        lines.push(format!("Loading {} video(s)...", video_loading_count));
     }
     for p in errors {
         lines.push(format!("Failed: {}", p.display()));
@@ -982,9 +1409,10 @@ mod tests {
         let tmp = setup("accepts_files");
         let file = tmp.join("a.png");
         let mut app = MmCompare::default();
-        let (files, dirs) = app.classify_paths(vec![file.clone()]);
+        let (files, dirs, videos) = app.classify_paths(vec![file.clone()]);
         assert_eq!(files, vec![file], "未定模式接受文件");
         assert!(dirs.is_empty());
+        assert!(videos.is_empty());
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -995,7 +1423,7 @@ mod tests {
         let mut app = MmCompare::default();
         app.state
             .append_standalone_images(vec![make_info(&ctx, "a")]);
-        let (files, dirs) = app.classify_paths(vec![tmp.join("sub")]);
+        let (files, dirs, _videos) = app.classify_paths(vec![tmp.join("sub")]);
         assert!(files.is_empty() && dirs.is_empty(), "文件模式拒绝目录");
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1007,7 +1435,7 @@ mod tests {
             loading_total: 1, // 模拟文件批次加载中（图片尚未入 state）
             ..Default::default()
         };
-        let (files, dirs) = app.classify_paths(vec![tmp.join("sub")]);
+        let (files, dirs, _videos) = app.classify_paths(vec![tmp.join("sub")]);
         assert!(
             files.is_empty() && dirs.is_empty(),
             "文件加载窗口期拒绝目录"
@@ -1030,7 +1458,7 @@ mod tests {
             scroll_to: None,
         });
         app.state.cell_order.push(CellKind::Folder(0));
-        let (files, dirs) = app.classify_paths(vec![tmp.join("a.png")]);
+        let (files, dirs, _videos) = app.classify_paths(vec![tmp.join("a.png")]);
         assert!(files.is_empty() && dirs.is_empty(), "文件夹模式拒绝文件");
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1042,7 +1470,7 @@ mod tests {
         let mut app = MmCompare::default();
         app.folder.queue_scan(vec![tmp.clone()]);
         assert!(app.folder.has_pending(), "扫描窗口期");
-        let (files, dirs) = app.classify_paths(vec![tmp.join("a.png")]);
+        let (files, dirs, _videos) = app.classify_paths(vec![tmp.join("a.png")]);
         assert!(files.is_empty() && dirs.is_empty(), "扫描窗口期拒绝文件");
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -1051,11 +1479,80 @@ mod tests {
     fn mixed_batch_prefers_folder() {
         let tmp = setup("mixed_batch");
         let mut app = MmCompare::default();
-        let (files, dirs) = app.classify_paths(vec![tmp.join("a.png"), tmp.join("sub")]);
+        let (files, dirs, _videos) = app.classify_paths(vec![tmp.join("a.png"), tmp.join("sub")]);
         assert!(files.is_empty(), "同批混合时目录优先，文件被忽略");
         assert_eq!(dirs, vec![tmp.join("sub")]);
         let _ = fs::remove_dir_all(&tmp);
     }
+    #[test]
+    fn video_batch_enters_video_mode() {
+        // 已有图片 + 拖入视频 → 图片被清空，视频被接受（M2 简化切换）
+        let tmp = setup("video_enter");
+        fs::write(tmp.join("a.mp4"), b"mp4").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = MmCompare::default();
+        app.state
+            .append_standalone_images(vec![make_info(&ctx, "img")]);
+        let (files, dirs, videos) = app.classify_paths(vec![tmp.join("a.mp4")]);
+        assert!(files.is_empty() && dirs.is_empty());
+        assert_eq!(videos, vec![tmp.join("a.mp4")]);
+        assert!(app.state.image_cells.is_empty(), "进入视频模式清空图片");
+        assert!(!app.state.loaded_paths.contains(&PathBuf::from("img")));
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn image_batch_exits_video_mode() {
+        let tmp = setup("video_exit");
+        let mut app = MmCompare::default();
+        let v = VideoCell {
+            path: tmp.join("a.mp4"),
+            info: crate::core::video::VideoInfo {
+                width: 320,
+                height: 240,
+                duration_secs: 2.0,
+                frame_rate: 30.0,
+            },
+            texture: None,
+            playing: false,
+            position_secs: 0.0,
+            frame_pts: 0.0,
+            failed: false,
+        };
+        app.state.append_videos(vec![v]);
+        let (files, dirs, videos) = app.classify_paths(vec![tmp.join("a.png")]);
+        assert_eq!(files, vec![tmp.join("a.png")]);
+        assert!(dirs.is_empty() && videos.is_empty());
+        assert!(app.state.video_cells.is_empty(), "回图片模式清空视频");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn mixed_batch_prefers_video() {
+        let tmp = setup("video_mixed");
+        fs::write(tmp.join("v.mp4"), b"mp4").unwrap();
+        let mut app = MmCompare::default();
+        let (files, dirs, videos) = app.classify_paths(vec![tmp.join("v.mp4"), tmp.join("a.png")]);
+        assert!(files.is_empty() && dirs.is_empty(), "混合批视频优先");
+        assert_eq!(videos, vec![tmp.join("v.mp4")]);
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn videos_truncated_to_max() {
+        let tmp = setup("video_max");
+        let mut paths = Vec::new();
+        for i in 0..6 {
+            let p = tmp.join(format!("v{i}.mp4"));
+            fs::write(&p, b"mp4").unwrap();
+            paths.push(p);
+        }
+        let mut app = MmCompare::default();
+        let (_, _, videos) = app.classify_paths(paths);
+        assert_eq!(videos.len(), MAX_VIDEOS, "视频上限 4");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
     #[test]
     fn same_batch_folders_are_sorted() {
         // 同时拖入（同一批次）的文件夹按名字排序；依次拖入（每批单个）不受影响
@@ -1064,7 +1561,8 @@ mod tests {
         fs::create_dir_all(dir.join("z_folder")).unwrap();
         fs::create_dir_all(dir.join("a_folder")).unwrap();
         let mut app = MmCompare::default();
-        let (files, dirs) = app.classify_paths(vec![dir.join("z_folder"), dir.join("a_folder")]);
+        let (files, dirs, _videos) =
+            app.classify_paths(vec![dir.join("z_folder"), dir.join("a_folder")]);
         assert!(files.is_empty());
         assert_eq!(
             dirs,
@@ -1072,7 +1570,7 @@ mod tests {
             "同批文件夹按名字排序"
         );
         // 单目录批次：保持原样（排序对单个无影响）
-        let (_, dirs2) = app.classify_paths(vec![dir.join("z_folder")]);
+        let (_, dirs2, _) = app.classify_paths(vec![dir.join("z_folder")]);
         assert_eq!(dirs2, vec![dir.join("z_folder")]);
         let _ = fs::remove_dir_all(&dir);
     }

@@ -16,8 +16,11 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::core::image::AvgStats;
+use crate::core::video::VideoInfo;
 
 pub const MAX_IMAGES: usize = 8;
+/// 视频上限（D3）：独立于图片上限，视频模式最多 4 个。
+pub const MAX_VIDEOS: usize = 4;
 
 /// 文件夹 cell 渲染层上报的用户意图，由 imlayout 统一处理。
 #[derive(Clone)]
@@ -93,6 +96,7 @@ pub struct FolderCell {
 pub enum CellKind {
     Image(usize),
     Folder(usize),
+    Video(usize),
 }
 
 pub type NormRect = [f32; 4];
@@ -103,9 +107,25 @@ pub(crate) enum DragKind {
     MoveSelection,
 }
 
+/// 一个视频 cell：解码结果（首帧后获得 info/纹理）+ 播放状态。
+/// 解码线程句柄与帧通道在 imlayout（ADR-0001：线程原语物理隔离）。
+pub struct VideoCell {
+    pub path: PathBuf,
+    pub info: VideoInfo,
+    pub texture: Option<eframe::egui::TextureHandle>,
+    pub playing: bool,
+    /// 目标位置（秒）：暂停时用户 seek/步进的目标；播放时跟随帧 pts。
+    pub position_secs: f64,
+    /// 当前显示帧的 pts（秒）。
+    pub frame_pts: f64,
+    /// 播放中解码失败（首帧已成功；失败后停止播放并显示错误）。
+    pub failed: bool,
+}
+
 pub struct AppState {
     pub image_cells: Vec<ImageCell>,
     pub folder_cells: Vec<FolderCell>,
+    pub video_cells: Vec<VideoCell>,
     pub cell_order: Vec<CellKind>,
 
     pub local_mode: bool,
@@ -131,6 +151,7 @@ impl AppState {
         Self {
             image_cells: Vec::new(),
             folder_cells: Vec::new(),
+            video_cells: Vec::new(),
             cell_order: Vec::new(),
             local_mode: false,
             show_exif: false,
@@ -156,6 +177,51 @@ impl AppState {
             self.cell_order.push(CellKind::Image(start + i));
             self.pan_offset.push([0.0, 0.0]);
         }
+    }
+
+    /// 追加视频 cell（首帧已由 imlayout 解码并上传纹理）。
+    pub fn append_videos(&mut self, cells: Vec<VideoCell>) {
+        let start = self.video_cells.len();
+        for (i, cell) in cells.into_iter().enumerate() {
+            self.video_cells.push(cell);
+            self.cell_order.push(CellKind::Video(start + i));
+            self.pan_offset.push([0.0, 0.0]);
+        }
+    }
+
+    /// 视频模式：全部 cell 都是视频且非空。
+    pub fn is_all_videos(&self) -> bool {
+        !self.cell_order.is_empty()
+            && self
+                .cell_order
+                .iter()
+                .all(|c| matches!(c, CellKind::Video(_)))
+    }
+
+    /// 进入视频模式：清空图片与文件夹（M2 简化切换；M3 改为保留状态）。
+    pub fn clear_images_and_folders(&mut self) {
+        self.image_cells.clear();
+        self.folder_cells.clear();
+        self.cell_order.clear();
+        self.pan_offset.clear();
+        self.loaded_paths.clear();
+        self.load_errors.clear();
+        self.local_mode = false;
+        self.show_exif = false;
+        self.show_histogram = false;
+        self.zoom = 1.0;
+        self.pan = [0.0, 0.0];
+        self.reorder_src = None;
+        self.pending_remove.clear();
+    }
+
+    /// 离开视频模式：清空视频（M2 简化切换；M3 改为保留状态）。
+    pub fn clear_videos(&mut self) {
+        self.video_cells.clear();
+        self.cell_order.clear();
+        self.pan_offset.clear();
+        self.loaded_paths.clear();
+        self.load_errors.clear();
     }
 
     /// 把文件夹条目打开为图片 cell。
@@ -384,6 +450,17 @@ impl AppState {
                 for entry in &mut self.cell_order {
                     if let CellKind::Folder(idx) = entry
                         && *idx > folder_idx
+                    {
+                        *idx -= 1;
+                    }
+                }
+            }
+            CellKind::Video(video_idx) => {
+                self.loaded_paths.remove(&self.video_cells[video_idx].path);
+                self.video_cells.remove(video_idx);
+                for entry in &mut self.cell_order {
+                    if let CellKind::Video(idx) = entry
+                        && *idx > video_idx
                     {
                         *idx -= 1;
                     }
@@ -668,6 +745,67 @@ mod tests {
         s.open_folder_entry(fi, 8, make_info(&ctx, "f8"));
         assert_eq!(s.image_cells.len(), 8, "第 9 张被拒");
     }
+    #[test]
+    fn video_append_remove_and_index_fix() {
+        let mut s = AppState::new();
+        let mk = |name: &str| VideoCell {
+            path: PathBuf::from(name),
+            info: VideoInfo {
+                width: 320,
+                height: 240,
+                duration_secs: 2.0,
+                frame_rate: 30.0,
+            },
+            texture: None,
+            playing: false,
+            position_secs: 0.0,
+            frame_pts: 0.0,
+            failed: false,
+        };
+        s.append_videos(vec![mk("a.mp4"), mk("b.mp4")]);
+        assert!(s.is_all_videos(), "全视频 = 视频模式");
+        assert_eq!(s.cell_order.len(), 2);
+        s.remove_cell(0);
+        assert_eq!(s.video_cells.len(), 1, "删除后下标修正");
+        assert!(matches!(s.cell_order[0], CellKind::Video(0)));
+        assert!(!s.loaded_paths.contains(&PathBuf::from("a.mp4")));
+        s.remove_cell(0);
+        assert!(!s.is_all_videos(), "空网格不是视频模式");
+    }
+
+    #[test]
+    fn video_image_mode_switch_clears_other_side() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        s.append_standalone_images(vec![make_info(&ctx, "img")]);
+        s.clear_images_and_folders();
+        assert!(
+            s.image_cells.is_empty() && s.cell_order.is_empty(),
+            "进视频模式清空图片"
+        );
+
+        let v = VideoCell {
+            path: PathBuf::from("v.mp4"),
+            info: VideoInfo {
+                width: 320,
+                height: 240,
+                duration_secs: 2.0,
+                frame_rate: 30.0,
+            },
+            texture: None,
+            playing: false,
+            position_secs: 0.0,
+            frame_pts: 0.0,
+            failed: false,
+        };
+        s.append_videos(vec![v]);
+        s.clear_videos();
+        assert!(
+            s.video_cells.is_empty() && s.cell_order.is_empty(),
+            "回图片模式清空视频"
+        );
+    }
+
     #[test]
     fn open_image_keeps_folder_position() {
         // 左文件夹的图占据左 cell（原文件夹位置），依次打开也不串位

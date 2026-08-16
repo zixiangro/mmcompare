@@ -102,6 +102,15 @@ pub(crate) fn is_image_ext(p: &Path) -> bool {
     })
 }
 
+pub(crate) fn is_video_ext(p: &Path) -> bool {
+    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+        matches!(
+            e.to_ascii_lowercase().as_str(),
+            "mp4" | "mov" | "mkv" | "avi" | "webm" | "m4v" | "ts" | "m2ts" | "flv" | "wmv"
+        )
+    })
+}
+
 pub(crate) fn sort_paths(paths: &mut [PathBuf]) {
     paths.sort_by(|a, b| {
         let na = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
