@@ -1003,8 +1003,10 @@ mod tests {
     #[test]
     fn file_loading_window_rejects_folder() {
         let tmp = setup("loading_window");
-        let mut app = MmCompare::default();
-        app.loading_total = 1; // 模拟文件批次加载中（图片尚未入 state）
+        let mut app = MmCompare {
+            loading_total: 1, // 模拟文件批次加载中（图片尚未入 state）
+            ..Default::default()
+        };
         let (files, dirs) = app.classify_paths(vec![tmp.join("sub")]);
         assert!(
             files.is_empty() && dirs.is_empty(),

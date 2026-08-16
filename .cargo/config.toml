@@ -1,0 +1,10 @@
+# 本地 ffmpeg 开发库路径（force=false：CI 或系统已有同名环境变量时优先用已有的）
+# Windows: gyan.dev full_build-shared 9.0.1 解压目录（含 include/ + lib/*.lib）
+[env]
+FFMPEG_DIR = { value = "D:/Projects/ffmpeg-builds/ffmpeg-9.0.1-full_build-shared", force = false }
+# bindgen 运行时加载 libclang.dll（pip libclang wheel 提取，不装系统）
+LIBCLANG_PATH = { value = "D:/Projects/ffmpeg-builds/libclang", force = false }
+# ffmpeg-sys-next build.rs 用 cc 编译版本探测程序；本机无 MSVC cl.exe，用 mingw gcc
+CC = { value = "gcc", force = false }
+# bindgen 解析 ffmpeg 头文件：借 mingw64 头文件 + clang 内置头（resource-dir）+ mingw target
+BINDGEN_EXTRA_CLANG_ARGS = { value = "-IC:/Users/zixiang/.local/mingw64/x86_64-w64-mingw32/include --target=x86_64-w64-mingw32 -resource-dir=D:/Projects/ffmpeg-builds/clang-resource", force = false }

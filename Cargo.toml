@@ -14,6 +14,8 @@ image = "0.25"
 jpeg-decoder = "0.3"
 log = "0.4"
 nom-exif = "3.6"
+# 视频解码（M1 spike）：只开 codec/format/swscale，裁剪 device/filter/swresample（无音频，D5）
+ffmpeg-next = { version = "9.0", default-features = false, features = ["format", "software-scaling"] }
 
 [profile.release]
 panic = "abort"

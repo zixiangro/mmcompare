@@ -30,12 +30,14 @@
 
 ### M1 解码选型 spike（先决任务）
 
-- [ ] 解码候选对比：`ffmpeg-next` vs 子进程 ffmpeg vs symphonia，结论进 ADR-0007 备选方案节
-- [ ] dev 引入依赖 + **三平台 CI 构建验证**（Windows: vcpkg/预编译包 + FFMPEG_DIR；Linux: libavcodec 系 apt 包；macOS: brew）
-- [ ] `core/video.rs` 雏形：首帧提取、时长/帧率/尺寸读取；只初始化视频流（D5）
-- [ ] 解码分辨率降采样策略（swscale），为 M5 内存上限铺路
-- [ ] ADR-0007：视频架构决策（模式切换 + 模块划分 + 解码选型 + 交互隔离原则）
-- ✅ 验收：dev CI 三平台绿；`cargo test` 通过
+- [x] 解码候选对比：结论进 ADR-0007 备选方案节（symphonia 无 H.264/265；openh264+libde265 自研成本高；子进程违背单二进制）
+- [x] dev 引入 ffmpeg-next 9.0（format + software-scaling，裁掉 device/filter/swresample）；**三平台 CI 配置完成，待 CI 验证**
+- [x] `core/video.rs` 雏形：read_info（时长/帧率/尺寸）+ first_frame（swscale 转 RGB24，可降采样）；只初始化视频流（D5）；4 个单测
+- [x] 降采样策略：first_frame 最长边限制 + BILINEAR（swscale）
+- [x] ADR-0007：已接受（单程序模式切换 + ffmpeg 动态链接 + 交互隔离）
+- [x] 本机无 VS 环境的构建链路固化到 .cargo/config.toml（CC=gcc / libclang.dll / mingw 头 + clang 资源目录）
+- [x] build.rs：Windows 自动拷 ffmpeg dll 到 target/，cargo run/test 免手动配 PATH
+- [ ] **验收：dev CI 三平台绿（push 后确认）；`cargo test` 通过（本地已绿 35 个）**
 
 ### M2 视频 cell（单视频播放闭环）
 

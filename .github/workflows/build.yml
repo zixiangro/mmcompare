@@ -20,10 +20,50 @@ jobs:
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-18-dev
+
+      # Windows: gyan.dev full_build-shared 9.0.1（MSVC .lib + include + dll）
+      # build.rs 会把 dll 拷到 target/，测试运行时直接可用
+      - name: Fetch FFmpeg (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build-shared.zip -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath .
+          $dir = (Get-ChildItem -Directory ffmpeg-* | Select-Object -First 1).FullName
+          echo "FFMPEG_DIR=$dir" >> $env:GITHUB_ENV
+          echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
+          echo "CC=" >> $env:GITHUB_ENV
+          echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
+
+      # Linux: BtbN lgpl-shared（master 9.x，.so + include）
+      - name: Fetch FFmpeg (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          curl -sL -o ffmpeg.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl-shared.tar.xz
+          tar -xf ffmpeg.tar.xz
+          dir=$(ls -d ffmpeg-* | head -1)
+          echo "FFMPEG_DIR=$PWD/$dir" >> $GITHUB_ENV
+          echo "LD_LIBRARY_PATH=$PWD/$dir/lib" >> $GITHUB_ENV
+          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
+          echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $GITHUB_ENV
+
+      # macOS: brew（需要 FFmpeg >= 9.0，版本不足快速失败）
+      - name: Fetch FFmpeg (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ffmpeg
+          major=$(ffmpeg -version | head -1 | sed -n 's/.*version \([0-9]*\).*/\1/p')
+          echo "FFmpeg major version: $major"
+          if [ "$major" -lt 9 ]; then echo "FFmpeg >= 9.0 required"; exit 1; fi
+          echo "LIBCLANG_PATH=/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/lib" >> $GITHUB_ENV
+          echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $GITHUB_ENV
 
       - name: Build
         run: cargo build --release
+
+      - name: Test
+        run: cargo test
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

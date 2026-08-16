@@ -17,6 +17,7 @@ ADR（Architecture Decision Record）把"为什么代码长这样"写下来。�
 | [0004](0004-module-separation.md) | 前后端分层 + 布局/渲染解耦 | 已接受（ui 划分被 0005 取代） |
 | [0005](0005-merge-orchestration-into-imlayout.md) | 合并编排层与布局引擎为 imlayout（统筹所有 cell） | 已接受（文件夹部分被 0006 取代） |
 | [0006](0006-folder-module-separation.md) | 文件夹管理拆分独立模块 folder.rs | 已接受 |
+| [0007](0007-video-mode.md) | 视频对比：单程序模式切换 + ffmpeg 解码 | 已接受 |
 
 ## 模板
 
