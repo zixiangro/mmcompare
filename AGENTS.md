@@ -33,7 +33,8 @@ docs/
     ├── 0002-manual-layout.md           # 手动坐标布局
     ├── 0003-loading-pipeline.md        # 加载管线分工
     ├── 0004-module-separation.md       # 模块边界
-    └── 0005-merge-orchestration-into-imlayout.md  # 编排层与布局引擎合并为 imlayout
+    ├── 0005-merge-orchestration-into-imlayout.md  # 编排层与布局引擎合并为 imlayout
+    └── 0006-folder-module-separation.md  # 文件夹管理拆分独立模块 folder.rs
 ```
 
 ## 3. 工程规范
@@ -41,26 +42,25 @@ docs/
 ### 3.1 架构分层（ADR-0004）
 
 ```
-core/   纯数据处理，零 GUI 依赖（解码、旋转、直方图、统计、标签、EXIF）
+core/   纯数据处理，零 GUI 依赖（解码、缩略图、旋转、直方图、统计、标签、EXIF）
 state.rs 纯数据结构，只有状态与状态转移薄方法
 ui/     只读 state 渲染；交互结果写入 state，不直接改业务状态
-        ├── imlayout.rs  统筹所有 cell（图片 + 文件夹）：加载管线、键盘事件、标题、
-        │                网格布局、交互编排、文件夹扫描/打开/导航
-        │                （唯一允许线程原语的模块）
-        └── imcell.rs    单格渲染单元：给定"格子矩形 + cell 数据"，画好一个 cell
-                        （图片居中绘制/覆盖层/旋转，文件夹列表/缩略图/菜单）
+        ├── imlayout.rs  统筹层：图片 cell 加载管线、键盘、标题、网格布局、交互编排
+        ├── folder.rs    文件夹 cell：扫描/缩略图/打开/导航/渲染（FolderManager）
+        └── imcell.rs    图片 cell 渲染单元：给定"格子矩形 + 图片"，画好一张图
 ```
 
 ### 3.2 线程模型（ADR-0001）
 
-- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `imlayout.rs` 的 `spawn_loaders`/`poll_loading`/`poll_drops`/`drain_pending_drops`/`scan_folders`/`poll_scan`。
+- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `imlayout.rs` 与 `ui/folder.rs` 的加载/扫描方法组（`spawn_loaders`/`poll_loading`/`scan_folders`/`poll_scan` 等）。
 - 子线程用完即弃，线程间仅 `mpsc::channel`。**禁止 `Arc<Mutex<>>`、`RwLock`、线程池**。
 - 重 CPU 计算（解码、EXIF、直方图）必须放子线程；主线程只做纹理上传（ADR-0003）。
 
 ### 3.3 布局与渲染解耦（ADR-0002/0004）
 
-- `imlayout.rs` 统筹层：只算 cell 位置、画分隔线、编排交互、跑加载管线、管理文件夹 cell。不关心单个 cell 怎么画。
-- `imcell.rs` 单格渲染单元：cell → 屏幕的一切（图片的居中绘制/纹理重建/旋转封装/覆盖层，文件夹的列表/缩略图/右键菜单）。不关心自己在哪、不碰 state。
+- `imlayout.rs` 统筹层：只算 cell 位置、画分隔线、编排交互、跑图片加载管线。不关心单个 cell 怎么画。
+- `folder.rs` 文件夹子系统：扫描/缩略图/打开/导航/渲染全部收拢，imlayout 只做编排调用。
+- `imcell.rs` 图片渲染单元：图片 → 屏幕的一切（居中绘制、纹理重建、旋转封装、覆盖层）。不关心自己在哪、不碰 state。
 - 像素算法（旋转/直方图/统计）在 `core`；`imcell` 封装"cell 操作"但不碰 state（返回值由 `imlayout` 写回）；选区失效等状态转移归 `state.rs`。
 - 完全手动坐标（`allocate_exact_size` → `pos2` → `painter`/`allocate_rect`），不用自动布局。
 
@@ -112,7 +112,7 @@ ui/     只读 state 渲染；交互结果写入 state，不直接改业务状�
 | `E` / `H` | 切换 EXIF 摘要 / 直方图显示 |
 | `1-8` | 旋转对应位置图片（顺时针 90°；导航到下一张后重置为原始方向） |
 | `Q` | 按住：两张图时互换显示（对比） |
-| `Space` / `B` | 文件夹打开的图片：上一张 / 下一张 |
+| `Space` / `B` | 对比对（≥2 个文件夹图片）同步上/下一张：每个文件夹各自索引 |
 | `Esc` | 关闭文件夹打开的图片，恢复文件夹视图 |
 | 滚轮 | 全局缩放（图片模式下）；文件夹 cell 内为滚动条目 |
 | 左键拖拽 | 缩放 >1 时全局平移；局部模式下为框选 |
@@ -120,7 +120,8 @@ ui/     只读 state 渲染；交互结果写入 state，不直接改业务状�
 | `Ctrl` + 右键 | 删除当前 cell（图片或文件夹） |
 | `Ctrl` + 左键拖拽 | 重排 |
 
-拖入图片**或文件夹**均可；文件夹 cell 内双击条目打开图片，右键菜单管理条目。
+拖入图片**或文件夹**均可；每个文件夹同时最多打开 1 张图片（重复打开自动替换），
+拖入两个文件夹可构成对比对：各打开一张后并列展示，`Space`/`B` 同步索引。
 
 ## 6. 布局规则
 

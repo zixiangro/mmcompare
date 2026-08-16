@@ -30,10 +30,10 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
 /// 只解码需要的 DCT 块，峰值内存约为全解码的 1/60；其余格式全解码后
 /// 用快速缩略算法（链式半采样）。调用方负责设置 `path`。
 pub fn decode_thumbnail_bytes(bytes: &[u8], size: u32) -> Option<DecodedImage> {
-    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        if let Some(img) = decode_jpeg_thumb(bytes, size) {
-            return Some(img);
-        }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF])
+        && let Some(img) = decode_jpeg_thumb(bytes, size)
+    {
+        return Some(img);
     }
     let img = image::load_from_memory(bytes).ok()?;
     let img = img.thumbnail(size, size).to_rgba8();
@@ -47,21 +47,27 @@ pub fn decode_thumbnail_bytes(bytes: &[u8], size: u32) -> Option<DecodedImage> {
 
 /// JPEG 解码器级降采样：scale 到接近目标尺寸后快速缩略。
 /// 非标准 JPEG / 无法缩放时返回 `None`，由调用方回退全解码。
+///
+/// 注意：**不要**调用 `set_color_transform`——那会忽略 JPEG 的
+/// App 段色彩信息（YCbCr 会被当 RGB 解码，颜色错乱）；
+/// 让解码器按组件标识自动判断（`determine_color_transform`）。
 fn decode_jpeg_thumb(bytes: &[u8], size: u32) -> Option<DecodedImage> {
     let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
-    dec.set_color_transform(jpeg_decoder::ColorTransform::RGB);
     let (w, h) = dec.scale(size as u16, size as u16).ok()?;
     let pixels = dec.decode().ok()?;
-    let channels = match dec.info().map(|i| i.pixel_format) {
-        Some(jpeg_decoder::PixelFormat::L8) | Some(jpeg_decoder::PixelFormat::L16) => 1,
-        _ => 3,
-    };
-    let rgba: Vec<u8> = match channels {
-        1 => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-        _ => pixels
+    let format = dec.info()?.pixel_format;
+    let rgba: Vec<u8> = match format {
+        jpeg_decoder::PixelFormat::L8 => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+        jpeg_decoder::PixelFormat::L16 => pixels
+            .chunks_exact(2)
+            .flat_map(|p| [p[0], p[0], p[0], 255])
+            .collect(),
+        jpeg_decoder::PixelFormat::RGB24 => pixels
             .chunks_exact(3)
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect(),
+        // CMYK 无法在此路径转换，回退全解码（image crate 负责转换）
+        jpeg_decoder::PixelFormat::CMYK32 => return None,
     };
     if rgba.len() != w as usize * h as usize * 4 {
         return None;
@@ -229,6 +235,43 @@ pub fn extract_exif(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_solid_jpeg(w: u32, h: u32, rgb: (u8, u8, u8)) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(w, h);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([rgb.0, rgb.1, rgb.2, 255]);
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn jpeg_thumbnail_preserves_red() {
+        // YCbCr 编码的 JPEG：若色彩变换错误（YCbCr 被当 RGB），红色会变成青色
+        let bytes = make_solid_jpeg(2000, 1500, (255, 0, 0));
+        let thumb = decode_thumbnail_bytes(&bytes, 64).expect("thumb");
+        let i = (thumb.rgba.len() / 2 / 4) * 4;
+        let (r, g, b) = (thumb.rgba[i], thumb.rgba[i + 1], thumb.rgba[i + 2]);
+        assert!(
+            r > 200 && g < 80 && b < 80,
+            "expected red, got rgb=({r},{g},{b})"
+        );
+    }
+
+    #[test]
+    fn jpeg_thumbnail_preserves_green() {
+        let bytes = make_solid_jpeg(2000, 1500, (0, 255, 0));
+        let thumb = decode_thumbnail_bytes(&bytes, 64).expect("thumb");
+        let i = (thumb.rgba.len() / 2 / 4) * 4;
+        let (r, g, b) = (thumb.rgba[i], thumb.rgba[i + 1], thumb.rgba[i + 2]);
+        assert!(
+            g > 200 && r < 80 && b < 80,
+            "expected green, got rgb=({r},{g},{b})"
+        );
+    }
 
     fn make_jpeg(w: u32, h: u32) -> Vec<u8> {
         let mut img = image::RgbaImage::new(w, h);

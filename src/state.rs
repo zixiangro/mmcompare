@@ -153,9 +153,30 @@ impl AppState {
         }
     }
 
-    /// 把文件夹条目打开为图片 cell，同时从网格隐藏该文件夹 cell。
-    /// 网格已满时拒绝（打开后文件夹隐藏腾 1 格，但调用方已按名额截断）。
+    /// 把文件夹条目打开为图片 cell（每个文件夹同时最多 1 张：
+    /// 再次打开同文件夹条目时替换已有图片，不新增 cell）。
+    /// 网格已满时拒绝；打开后从网格隐藏该文件夹 cell。
     pub fn open_folder_entry(&mut self, folder_idx: usize, entry_idx: usize, info: ImageInfo) {
+        if let Some(pos) = self.image_cells.iter().position(|c| {
+            matches!(
+                c.source,
+                ImageSource::FromFolder {
+                    folder_idx: fi,
+                    ..
+                } if fi == folder_idx
+            )
+        }) {
+            let cell = &mut self.image_cells[pos];
+            cell.info = info;
+            cell.selection = None;
+            cell.avg_stats = None;
+            cell.source = ImageSource::FromFolder {
+                folder_idx,
+                entry_idx,
+            };
+            self.folder_cells[folder_idx].open_entry = Some(entry_idx);
+            return;
+        }
         if self.cell_order.len() >= MAX_IMAGES {
             return;
         }
@@ -180,23 +201,41 @@ impl AppState {
         }
     }
 
-    /// 文件夹导航（Space/B）的目标条目：只计算不改状态，
-    /// 由 imlayout 加载完成后统一写入（`apply_navigated_image`）。
-    pub fn folder_nav_target(&self, img_idx: usize, delta: i32) -> Option<(usize, usize, PathBuf)> {
-        let cell = self.image_cells.get(img_idx)?;
-        let ImageSource::FromFolder {
-            folder_idx,
-            entry_idx,
-        } = cell.source
-        else {
-            return None;
-        };
-        let folder = self.folder_cells.get(folder_idx)?;
-        let new_idx = (entry_idx as i32 + delta).clamp(0, folder.entries.len() as i32 - 1) as usize;
-        if new_idx == entry_idx {
-            return None;
+    /// 导航（Space/B）的目标条目：所有打开的文件夹图片各自的下一条/上一条。
+    /// 返回 (图片下标, 文件夹下标, 新条目下标, 路径)，由 imlayout 统一加载。
+    pub fn folder_nav_targets(&self, delta: i32) -> Vec<(usize, usize, usize, PathBuf)> {
+        let mut targets = Vec::new();
+        for (img_idx, cell) in self.image_cells.iter().enumerate() {
+            let ImageSource::FromFolder {
+                folder_idx,
+                entry_idx,
+            } = cell.source
+            else {
+                continue;
+            };
+            let Some(folder) = self.folder_cells.get(folder_idx) else {
+                continue;
+            };
+            let new_idx =
+                (entry_idx as i32 + delta).clamp(0, folder.entries.len() as i32 - 1) as usize;
+            if new_idx != entry_idx {
+                targets.push((
+                    img_idx,
+                    folder_idx,
+                    new_idx,
+                    folder.entries[new_idx].clone(),
+                ));
+            }
         }
-        Some((folder_idx, new_idx, folder.entries[new_idx].clone()))
+        targets
+    }
+
+    /// 打开的文件夹图片数量（对比对判定用：≥2 才响应导航）。
+    pub fn folder_image_count(&self) -> usize {
+        self.image_cells
+            .iter()
+            .filter(|c| matches!(c.source, ImageSource::FromFolder { .. }))
+            .count()
     }
 
     /// 导航加载完成后替换图片内容，并作废选区（像素已变）。
@@ -218,17 +257,18 @@ impl AppState {
         self.folder_cells[folder_idx].open_entry = Some(entry_idx);
     }
 
-    /// Esc：关闭文件夹图片，恢复文件夹 cell 显示。
+    /// 关闭文件夹图片（Esc）：删除图片 cell，文件夹 cell 由
+    /// `remove_cell` 的 Image 分支自动恢复。
     pub fn close_folder_at_pos(&mut self, cell_pos: usize) {
         let Some(&CellKind::Image(img_idx)) = self.cell_order.get(cell_pos) else {
             return;
         };
-        let ImageSource::FromFolder { folder_idx, .. } = self.image_cells[img_idx].source else {
-            return;
-        };
-        self.remove_cell(cell_pos);
-        self.folder_cells[folder_idx].open_entry = None;
-        self.show_folder_cell(folder_idx);
+        if matches!(
+            self.image_cells[img_idx].source,
+            ImageSource::FromFolder { .. }
+        ) {
+            self.remove_cell(cell_pos);
+        }
     }
 
     fn show_folder_cell(&mut self, folder_idx: usize) {
@@ -248,6 +288,14 @@ impl AppState {
         };
         match cell_kind {
             CellKind::Image(img_idx) => {
+                let was_folder_image = matches!(
+                    self.image_cells[img_idx].source,
+                    ImageSource::FromFolder { .. }
+                );
+                let folder_idx = match self.image_cells[img_idx].source {
+                    ImageSource::FromFolder { folder_idx, .. } => Some(folder_idx),
+                    _ => None,
+                };
                 self.loaded_paths
                     .remove(&self.image_cells[img_idx].info.path);
                 self.image_cells.remove(img_idx);
@@ -257,6 +305,13 @@ impl AppState {
                     {
                         *idx -= 1;
                     }
+                }
+                if was_folder_image
+                    && let Some(folder_idx) = folder_idx
+                    && let Some(folder) = self.folder_cells.get_mut(folder_idx)
+                {
+                    folder.open_entry = None;
+                    self.show_folder_cell(folder_idx);
                 }
             }
             CellKind::Folder(folder_idx) => {

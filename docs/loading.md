@@ -11,26 +11,17 @@
 ```
 拖拽 / 命令行传参（文件或目录）
   │
-  ├─ 目录: scan_folders()（子线程 read_dir + 过滤 + 排序）
-  │     → poll_scan() 收齐 → register_folder_cell() 入格
-  │     → 缩略图排队 pending_thumbnails（等加载空闲）
+  ├─ 目录: ui/folder.rs（FolderManager 管线）
+  │     scan_folders() 子线程 read_dir → poll_scan() 登记入格
+  │     → 缩略图排队，分批（≤8 张）生成，JPEG 解码器级降采样
+  │     → 打开/导航走同一管线的 OpenEntry/OpenEntries/NavigateMany
   │
-  ├─ 主线程: spawn_loaders()（每批一个目标 LoadTarget）
-  │     Standalone    → 全图 + EXIF + 直方图，完成后 append
-  │     Thumbnails    → 缩略图（JPEG 解码器级降采样，保持宽高比），
-  │                     每批 ≤8 张按槽位写入 folder.thumbnails
-  │     OpenEntry     → 全图，完成后 open_folder_entry（文件夹 cell 隐藏）
-  │     OpenEntries   → 多张全图（按网格名额截断），逐个打开
-  │     Navigate      → 全图，完成后替换图片内容（Space/B 上一张/下一张）
+  ├─ imlayout.rs 管线（standalone 图片）
+  │     spawn_loaders() → 子线程：读文件 → decode → EXIF → 直方图 → mpsc
+  │     → poll_loading() 逐张上传 GPU → 收齐 append
   │
-  ├─ 子线程 ×N（纯 CPU，无共享状态）:
-  │     读文件 → decode（缩略图模式 resize 64×64）→ EXIF/直方图（缩略图跳过）
-  │     → tx.send((i, Ok(...))) 或 Err(path)
-  │
-  └─ 主线程每帧: poll_loading()
-       ├─ try_recv 收结果，逐张 load_texture() 上传 GPU（分散多帧）
-       ├─ Err: 记入 state.load_errors + 从 loaded_paths 移除（可重试）
-       └─ 收齐后按 load_target 分发 → request_repaint()
+  └─ 两条管线各自独立批次（`load_rx`），互不覆盖；
+     加载期间新到的拖拽进入 pending_drops，空闲后按序处理
 ```
 
 加载期间新到的拖拽进入 `pending_drops`，待缩略图目录进入 `pending_thumbnails`，

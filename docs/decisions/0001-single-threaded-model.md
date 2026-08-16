@@ -9,7 +9,10 @@ egui/eframe 要求 UI 状态（`AppState`、纹理）在主线程创建与访问
 ## 决策
 
 - **除图片加载外，一切代码在主线程运行**，包括全部 UI 逻辑与状态变更。
-- 多线程代码**物理隔离**在 `ui/imlayout.rs` 的 `spawn_loaders` / `poll_loading` / `poll_drops` / `drain_pending_drops` 方法中，其他模块不得出现线程原语。（隔离位置原为 `app.rs`，随 ADR-0005 合并迁移，决策本身不变。）
+- 多线程代码**物理隔离**在 `ui/imlayout.rs`（standalone 图片加载）与
+  `ui/folder.rs`（目录扫描、缩略图、打开/导航）的加载/扫描方法组中，
+  其他模块不得出现线程原语。（隔离位置原为 `app.rs`，随 ADR-0005/0006
+  模块重组迁移，决策本身不变。）
 - 子线程用完即弃（`std::thread::spawn` + 闭包捕获），不建线程池。
 - 线程间只通过 `std::sync::mpsc::channel` 通信，载荷是完整的自有数据（`LoadResult`），不共享引用。
 - 全仓库禁止 `Arc<Mutex<>>`、`RwLock`、全局可变状态。
@@ -27,5 +30,6 @@ egui/eframe 要求 UI 状态（`AppState`、纹理）在主线程创建与访问
 
 ## 关联
 
+- [ADR-0006 文件夹管理拆分独立模块](0006-folder-module-separation.md)
 - [ADR-0003 加载管线](0003-loading-pipeline.md)
 - [docs/loading.md](../loading.md)

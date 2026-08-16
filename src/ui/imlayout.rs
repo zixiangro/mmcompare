@@ -1,65 +1,38 @@
 //! 统筹层：加载管线、键盘事件、窗口标题、网格布局与交互编排。
 //!
-//! 本模块是应用主体（`MmCompare`），管理**所有** cell（图片 cell 与
-//! 文件夹 cell）：布局怎么排、交互怎么响应、图片怎么加载、文件夹怎么
-//! 扫描/打开/导航，全部在这里编排。`imcell` 只负责"给定一个格子矩形，
-//! 把一个 cell 画好"，不关心自己在哪、不关心有几个格子。
+//! 本模块是应用主体（`MmCompare`），管理**所有** cell 的编排：布局怎么排、
+//! 交互怎么响应、图片怎么加载，都在这里；文件夹 cell 的扫描/缩略图/
+//! 打开/导航与渲染收在 `ui/folder`（`FolderManager`），imlayout 只做
+//! 编排调用与键盘分发。`imcell` 负责图片 cell 的绘制。
 //!
-//! 这是全项目**唯一**允许出现线程原语的地方（ADR-0001）：
-//! 解码线程从这里 spawn，也只在 `poll_loading` 收结果。其余模块
-//! （state/core/imcell）永远运行在主线程，不需要考虑线程安全。
+//! 这是全项目**仅有的两个**允许出现线程原语的地方之一（ADR-0001）：
+//! 本模块的解码线程（standalone 图片）与 `folder.rs` 的扫描/加载线程，
+//! 其余模块永远运行在主线程，不需要考虑线程安全。
 //!
-//! 加载是一个"批次"状态机，状态分散在几个字段里，必须合起来看：
-//! - `load_rx`：有值 = 正在加载（`is_loading()` 据此判断）；
-//! - `loading_total` / `loading_received`：本批计划数 / 已收到数，相等即批次完成；
-//! - `loading_buf`：按加载顺序占位的缓冲，图片到达后立刻上传纹理填入槽位，
-//!   批次完成时按 `load_target` 分发（独立图片 / 文件夹缩略图 / 打开条目 / 导航）；
-//! - `pending_drops` / `pending_thumbnails`：加载期间收到的拖拽与待缩略图目录，
-//!   批次完成后按序处理，避免请求互相覆盖。
+//! 加载是一个"批次"状态机：`load_rx` 有值 = 正在加载；
+//! `loading_total` / `loading_received` 相等即批次完成；
+//! `loading_buf` 按加载顺序占位，批次完成时按序追加到 state。
+//! 加载期间收到的拖拽缓存到 `pending_drops`，完成后按序处理。
 //!
-//! 布局采用完全手动坐标（ADR-0002）：只算 cell 位置、画分隔线、编排交互，
-//! cell 怎么画委托给 `imcell`。交互状态变更集中在帧末统一应用
+//! 布局采用完全手动坐标（ADR-0002）。交互状态变更集中在帧末统一应用
 //! （`PanFeedback` 模式），避免渲染中途改状态。
 //!
 //! 完整流程见 docs/loading.md 与 docs/layout.md。
 
-use std::collections::{HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc;
 
 use eframe::egui;
 
 use crate::core;
-use crate::state::{
-    AppState, CellKind, FolderAction, FolderCell, FolderView, ImageInfo, ImageSource, MAX_IMAGES,
-};
+use crate::state::{AppState, CellKind, FolderAction, ImageInfo, ImageSource, MAX_IMAGES};
 
-use super::imcell;
+use super::{folder, imcell};
 
 const SEP: f32 = 1.0;
 const MARGIN: f32 = 6.0;
-/// 缩略图单批并发上限：同时解码的原图数 × (文件字节 + 解码缓冲) 即峰值内存。
-const THUMB_BATCH: usize = 8;
 
 type LoadResult = Result<(core::image::DecodedImage, String, [u32; 256]), PathBuf>;
-
-/// 本批加载结果的分发目标。
-enum LoadTarget {
-    Standalone,
-    Thumbnails {
-        folder_idx: usize,
-        start: usize,
-    },
-    OpenEntry(usize, usize),
-    OpenEntries {
-        folder_idx: usize,
-        entry_idxs: Vec<usize>,
-    },
-    Navigate(usize, usize, usize),
-}
-
-/// 目录扫描批次：路径 + 条目列表（失败为 `None`，不登记）。
-type ScanResult = Option<(PathBuf, Vec<PathBuf>)>;
 
 pub struct MmCompare {
     state: AppState,
@@ -67,14 +40,8 @@ pub struct MmCompare {
     loading_total: usize,
     loading_received: usize,
     loading_buf: Vec<Option<ImageInfo>>,
-    load_target: Option<LoadTarget>,
-    scan_rx: Option<mpsc::Receiver<(usize, ScanResult)>>,
-    scan_total: usize,
-    scan_received: usize,
-    scan_buf: Vec<ScanResult>,
     pending_drops: Vec<PathBuf>,
-    /// 待生成缩略图的 (文件夹下标, 下一个条目偏移)；每批限 `THUMB_BATCH` 张。
-    pending_thumbnails: VecDeque<(usize, usize)>,
+    folder: folder::FolderManager,
 }
 
 impl Default for MmCompare {
@@ -85,41 +52,15 @@ impl Default for MmCompare {
             loading_total: 0,
             loading_received: 0,
             loading_buf: Vec::new(),
-            load_target: None,
-            scan_rx: None,
-            scan_total: 0,
-            scan_received: 0,
-            scan_buf: Vec::new(),
             pending_drops: Vec::new(),
-            pending_thumbnails: VecDeque::new(),
+            folder: folder::FolderManager::default(),
         }
     }
 }
 
-fn is_image_ext(p: &Path) -> bool {
-    p.extension().and_then(|e| e.to_str()).is_some_and(|e| {
-        matches!(
-            e.to_ascii_lowercase().as_str(),
-            "png" | "jpg" | "jpeg" | "bmp" | "gif" | "webp"
-        )
-    })
-}
-
-fn sort_paths(paths: &mut [PathBuf]) {
-    paths.sort_by(|a, b| {
-        let na = a.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let nb = b.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        na.to_lowercase().cmp(&nb.to_lowercase())
-    });
-}
-
 impl MmCompare {
-    fn is_loading(&self) -> bool {
-        self.load_rx.is_some()
-    }
-
-    fn is_scanning(&self) -> bool {
-        self.scan_rx.is_some()
+    fn is_busy(&self) -> bool {
+        self.load_rx.is_some() || self.folder.is_busy()
     }
 
     /// 把输入路径分类为图片文件与文件夹（去重、排序、标记、截断名额），
@@ -135,11 +76,11 @@ impl MmCompare {
                 if !self.state.folder_cells.iter().any(|fc| fc.dir_path == p) {
                     folder_paths.push(p);
                 }
-            } else if is_image_ext(&p) && !self.state.loaded_paths.contains(&p) {
+            } else if folder::is_image_ext(&p) && !self.state.loaded_paths.contains(&p) {
                 file_paths.push(p);
             }
         }
-        sort_paths(&mut file_paths);
+        folder::sort_paths(&mut file_paths);
         for p in &file_paths {
             self.state.loaded_paths.insert(p.clone());
         }
@@ -149,10 +90,10 @@ impl MmCompare {
     pub fn load_startup_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         let (file_paths, folder_paths) = self.classify_paths(paths);
         if !file_paths.is_empty() {
-            self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
+            self.spawn_loaders(file_paths, ctx);
         }
         if !folder_paths.is_empty() {
-            self.scan_folders(folder_paths);
+            self.folder.scan_folders(folder_paths);
         }
     }
 
@@ -167,15 +108,15 @@ impl MmCompare {
         if file_paths.is_empty() && folder_paths.is_empty() {
             return;
         }
-        if self.is_loading() || self.is_scanning() {
+        if self.is_busy() {
             self.pending_drops.extend(file_paths);
             self.pending_drops.extend(folder_paths);
         } else {
             if !file_paths.is_empty() {
-                self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
+                self.spawn_loaders(file_paths, ctx);
             }
             if !folder_paths.is_empty() {
-                self.scan_folders(folder_paths);
+                self.folder.scan_folders(folder_paths);
             }
         }
     }
@@ -183,131 +124,26 @@ impl MmCompare {
     /// 加载完成后，把缓存中的拖拽路径启动为新一批（重新分类：
     /// 缓存期间格子可能已被删除/加满，名额变了）。
     fn drain_pending_drops(&mut self, ctx: &egui::Context) {
-        if self.is_loading() || self.is_scanning() || self.pending_drops.is_empty() {
+        if self.is_busy() || self.pending_drops.is_empty() {
             return;
         }
         let paths = std::mem::take(&mut self.pending_drops);
         let (file_paths, folder_paths) = self.classify_paths(paths);
         if !file_paths.is_empty() {
-            self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
+            self.spawn_loaders(file_paths, ctx);
         }
         if !folder_paths.is_empty() {
-            self.scan_folders(folder_paths);
+            self.folder.scan_folders(folder_paths);
         }
     }
 
-    /// 启动一批目录扫描（子线程 read_dir + 过滤 + 排序），
-    /// 结果由 `poll_scan` 收齐后登记为文件夹 cell。
-    fn scan_folders(&mut self, dirs: Vec<PathBuf>) {
-        self.scan_total = dirs.len();
-        self.scan_received = 0;
-        self.scan_buf = (0..dirs.len()).map(|_| None).collect();
-        let (tx, rx) = mpsc::channel();
-        for (i, dir) in dirs.into_iter().enumerate() {
-            let tx = tx.clone();
-            std::thread::spawn(move || {
-                let entries: ScanResult = std::fs::read_dir(&dir).ok().map(|rd| {
-                    let mut v: Vec<PathBuf> = rd
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.path())
-                        .filter(|p| is_image_ext(p))
-                        .collect();
-                    sort_paths(&mut v);
-                    (dir.clone(), v)
-                });
-                tx.send((i, entries)).ok();
-            });
-        }
-        drop(tx);
-        self.scan_rx = Some(rx);
-    }
-
-    /// 每帧收齐扫描结果，逐个登记文件夹 cell；缩略图加载排队。
-    fn poll_scan(&mut self) {
-        let Some(rx) = &self.scan_rx else {
-            return;
-        };
-        while let Ok((i, entries)) = rx.try_recv() {
-            self.scan_buf[i] = entries;
-            self.scan_received += 1;
-        }
-        if self.scan_received < self.scan_total {
-            return;
-        }
-        let dirs = std::mem::take(&mut self.scan_buf);
-        for scan in dirs {
-            if let Some((dir, entries)) = scan {
-                self.register_folder_cell(dir, entries);
-            }
-        }
-        self.scan_rx = None;
-        self.scan_total = 0;
-        self.scan_received = 0;
-    }
-
-    /// 登记一个已扫描完成的文件夹 cell（网格满时跳过）。
-    /// `thumbnails` 预填 `None` 与 `entries` 等长，分批写入时按槽位对齐。
-    fn register_folder_cell(&mut self, dir: PathBuf, entries: Vec<PathBuf>) {
-        if self.state.cell_order.len() >= MAX_IMAGES {
-            return;
-        }
-        let idx = self.state.folder_cells.len();
-        self.state.folder_cells.push(FolderCell {
-            dir_path: dir,
-            entries,
-            selected: HashSet::new(),
-            view_mode: FolderView::List,
-            scroll_offset: 0.0,
-            thumbnails: Vec::new(),
-            open_entry: None,
-        });
-        self.state.cell_order.push(CellKind::Folder(idx));
-        self.state.pan_offset.push([0.0, 0.0]);
-        let n = self.state.folder_cells[idx].entries.len();
-        self.state.folder_cells[idx].thumbnails = (0..n).map(|_| None).collect();
-        self.pending_thumbnails.push_back((idx, 0));
-    }
-
-    /// 缩略图分批：每次最多 `THUMB_BATCH` 张，队列按 (文件夹, 偏移) 推进。
-    /// 限并发同时控制峰值内存（8 张原图解码缓冲 + 文件字节）。
-    fn drain_pending_thumbnails(&mut self, ctx: &egui::Context) {
-        if self.is_loading() || self.pending_thumbnails.is_empty() {
-            return;
-        }
-        let (fi, offset) = self.pending_thumbnails[0];
-        let entries = match self.state.folder_cells.get(fi) {
-            Some(f) => f.entries.clone(),
-            None => {
-                self.pending_thumbnails.pop_front();
-                return;
-            }
-        };
-        if offset >= entries.len() {
-            self.pending_thumbnails.pop_front();
-            return;
-        }
-        let end = (offset + THUMB_BATCH).min(entries.len());
-        let batch = entries[offset..end].to_vec();
-        self.spawn_loaders(
-            batch,
-            ctx,
-            LoadTarget::Thumbnails {
-                folder_idx: fi,
-                start: offset,
-            },
-        );
-        self.pending_thumbnails[0].1 = end;
-    }
-
-    /// 启动一批加载：每张图一个临时线程。`thumb` 模式解码 64x64 缩略图，
-    /// 不提取 EXIF/直方图（缩略图用不到）。
-    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context, target: LoadTarget) {
+    /// 启动一批 standalone 图片加载：每张图一个临时线程，
+    /// 线程内读文件 → 解码 → EXIF → 直方图（纯 CPU，无共享状态）。
+    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
         self.loading_total = paths.len();
         self.loading_received = 0;
         self.loading_buf = (0..paths.len()).map(|_| None).collect();
         self.state.load_errors.clear();
-        let thumb = matches!(target, LoadTarget::Thumbnails { .. });
-        self.load_target = Some(target);
         let (tx, rx) = mpsc::channel();
 
         for (i, p) in paths.into_iter().enumerate() {
@@ -318,28 +154,13 @@ impl MmCompare {
                         log::warn!("read failed {}: {}", p.display(), e);
                         p.clone()
                     })?;
-                    let mut img = if thumb {
-                        core::image::decode_thumbnail_bytes(&bytes, 64).ok_or_else(|| {
-                            log::warn!("thumb decode failed {}", p.display());
-                            p.clone()
-                        })?
-                    } else {
-                        core::image::decode_image_bytes(&bytes).ok_or_else(|| {
-                            log::warn!("decode failed {}", p.display());
-                            p.clone()
-                        })?
-                    };
+                    let mut img = core::image::decode_image_bytes(&bytes).ok_or_else(|| {
+                        log::warn!("decode failed {}", p.display());
+                        p.clone()
+                    })?;
                     img.path = p.clone();
-                    let exif = if thumb {
-                        String::new()
-                    } else {
-                        core::image::extract_exif(&bytes)
-                    };
-                    let histogram = if thumb {
-                        [0u32; 256]
-                    } else {
-                        core::image::compute_y_histogram(&img.rgba)
-                    };
+                    let exif = core::image::extract_exif(&bytes);
+                    let histogram = core::image::compute_y_histogram(&img.rgba);
                     Ok((img, exif, histogram))
                 })();
                 tx.send((i, result)).ok();
@@ -351,7 +172,7 @@ impl MmCompare {
         ctx.request_repaint();
     }
 
-    /// 每帧把已完成的解码结果搬进 state，收齐后按 `load_target` 分发。
+    /// 每帧把已完成的解码结果搬进 state，收齐后按序追加。
     fn poll_loading(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.load_rx else {
             return;
@@ -385,49 +206,9 @@ impl MmCompare {
 
         if self.loading_received >= self.loading_total {
             let buf = std::mem::take(&mut self.loading_buf);
-            match self.load_target.take() {
-                Some(LoadTarget::Thumbnails { folder_idx, start }) => {
-                    if let Some(folder) = self.state.folder_cells.get_mut(folder_idx) {
-                        for (i, slot) in buf.into_iter().enumerate() {
-                            if start + i < folder.thumbnails.len() {
-                                folder.thumbnails[start + i] = slot.map(|info| info.texture);
-                            }
-                        }
-                    }
-                }
-                Some(LoadTarget::OpenEntry(folder_idx, entry_idx)) => {
-                    if let Some(Some(info)) = buf.into_iter().next()
-                        && folder_idx < self.state.folder_cells.len()
-                    {
-                        self.state.open_folder_entry(folder_idx, entry_idx, info);
-                    }
-                }
-                Some(LoadTarget::OpenEntries {
-                    folder_idx,
-                    entry_idxs,
-                }) => {
-                    if folder_idx < self.state.folder_cells.len() {
-                        for (i, slot) in buf.into_iter().enumerate() {
-                            if let (Some(info), Some(&ei)) = (slot, entry_idxs.get(i)) {
-                                self.state.open_folder_entry(folder_idx, ei, info);
-                            }
-                        }
-                    }
-                }
-                Some(LoadTarget::Navigate(img_idx, folder_idx, entry_idx)) => {
-                    if let Some(Some(info)) = buf.into_iter().next()
-                        && img_idx < self.state.image_cells.len()
-                        && folder_idx < self.state.folder_cells.len()
-                    {
-                        self.state
-                            .apply_navigated_image(img_idx, folder_idx, entry_idx, info);
-                    }
-                }
-                _ => {
-                    let infos: Vec<ImageInfo> = buf.into_iter().flatten().collect();
-                    self.state.append_standalone_images(infos);
-                }
-            }
+            let infos: Vec<ImageInfo> = buf.into_iter().flatten().collect();
+            self.state.append_standalone_images(infos);
+
             self.load_rx = None;
             self.loading_total = 0;
             self.loading_received = 0;
@@ -442,113 +223,6 @@ impl MmCompare {
         };
         self.state.image_cells[img_idx].info = new_info;
         self.state.invalidate_selection_after_rotation(img_idx);
-    }
-
-    fn handle_folder_action(&mut self, action: FolderAction, ctx: &egui::Context) {
-        match action {
-            FolderAction::OpenImage(idx) => {
-                for pos in 0..self.state.cell_order.len() {
-                    if let CellKind::Folder(fi) = self.state.cell_order[pos]
-                        && idx < self.state.folder_cells[fi].entries.len()
-                    {
-                        let path = self.state.folder_cells[fi].entries[idx].clone();
-                        if !self.is_loading() {
-                            self.spawn_loaders(vec![path], ctx, LoadTarget::OpenEntry(fi, idx));
-                        }
-                        break;
-                    }
-                }
-            }
-            FolderAction::OpenFolder(path) => {
-                #[cfg(target_os = "windows")]
-                {
-                    let _ = std::process::Command::new("explorer")
-                        .arg("/select,")
-                        .arg(&path)
-                        .spawn();
-                }
-                #[cfg(target_os = "macos")]
-                {
-                    let _ = std::process::Command::new("open")
-                        .arg("-R")
-                        .arg(&path)
-                        .spawn();
-                }
-                #[cfg(target_os = "linux")]
-                {
-                    if let Some(p) = path.parent() {
-                        let _ = std::process::Command::new("xdg-open").arg(p).spawn();
-                    }
-                }
-            }
-            FolderAction::Remove(idx) => {
-                for pos in 0..self.state.cell_order.len() {
-                    if let CellKind::Folder(fi) = self.state.cell_order[pos] {
-                        let f = &mut self.state.folder_cells[fi];
-                        if idx < f.entries.len() {
-                            f.entries.remove(idx);
-                            f.selected.remove(&idx);
-                            let sel: Vec<usize> = f.selected.iter().copied().collect();
-                            f.selected.clear();
-                            for s in sel {
-                                f.selected.insert(if s > idx { s - 1 } else { s });
-                            }
-                            if idx < f.thumbnails.len() {
-                                f.thumbnails.remove(idx);
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            FolderAction::OpenSelected => {
-                for pos in 0..self.state.cell_order.len() {
-                    if let CellKind::Folder(fi) = self.state.cell_order[pos] {
-                        let sel: Vec<usize> = self.state.folder_cells[fi]
-                            .selected
-                            .iter()
-                            .copied()
-                            .collect();
-                        if !sel.is_empty() && !self.is_loading() {
-                            // 打开后文件夹 cell 隐藏腾出 1 格，净增 = 张数 - 1；
-                            // 全选海量条目时按剩余名额截断，防止无限增长。
-                            let room = MAX_IMAGES
-                                .saturating_sub(self.state.cell_order.len())
-                                .saturating_add(1);
-                            let sel: Vec<usize> = sel.into_iter().take(room).collect();
-                            if !sel.is_empty() {
-                                let paths: Vec<PathBuf> = sel
-                                    .iter()
-                                    .map(|&i| self.state.folder_cells[fi].entries[i].clone())
-                                    .collect();
-                                self.spawn_loaders(
-                                    paths,
-                                    ctx,
-                                    LoadTarget::OpenEntries {
-                                        folder_idx: fi,
-                                        entry_idxs: sel,
-                                    },
-                                );
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-            FolderAction::ToggleView => {
-                for pos in 0..self.state.cell_order.len() {
-                    if let CellKind::Folder(fi) = self.state.cell_order[pos] {
-                        let f = &mut self.state.folder_cells[fi];
-                        f.view_mode = match f.view_mode {
-                            FolderView::List => FolderView::Thumbnail,
-                            FolderView::Thumbnail => FolderView::List,
-                        };
-                        break;
-                    }
-                }
-            }
-            FolderAction::None => {}
-        }
     }
 }
 
@@ -635,27 +309,17 @@ impl eframe::App for MmCompare {
                     self.state.close_folder_at_pos(pos);
                 }
                 changed = true;
-            } else if !self.is_loading() {
+            } else if !self.is_busy() {
+                // 对比对（≥2 个文件夹图片）才响应导航：同步推进每个文件夹的索引；
+                // 单文件夹 1 张时按 Space/B 无操作，避免歧义。
                 let delta: i32 = if space { 1 } else { -1 };
-                let mut nav = None;
-                for kind in self.state.cell_order.iter() {
-                    if let CellKind::Image(img_idx) = kind
-                        && let Some(t) = self.state.folder_nav_target(*img_idx, delta)
-                    {
-                        nav = Some((*img_idx, t));
-                        break;
-                    }
-                }
-                if let Some((img_idx, (folder_idx, entry_idx, path))) = nav {
-                    self.spawn_loaders(
-                        vec![path],
-                        ui.ctx(),
-                        LoadTarget::Navigate(img_idx, folder_idx, entry_idx),
-                    );
+                let targets = self.state.folder_nav_targets(delta);
+                if !targets.is_empty() && self.state.folder_image_count() >= 2 {
+                    self.folder.navigate(ui.ctx(), targets);
                 } else if space {
                     for fi in 0..self.state.folder_cells.len() {
                         if !self.state.folder_cells[fi].selected.is_empty() {
-                            self.handle_folder_action(FolderAction::OpenSelected, ui.ctx());
+                            self.folder.open_selected(&mut self.state, ui.ctx(), fi);
                             break;
                         }
                     }
@@ -685,9 +349,10 @@ impl eframe::App for MmCompare {
 
         self.poll_drops(ui.ctx());
         self.poll_loading(ui.ctx());
-        self.poll_scan();
+        self.folder.poll_scan(&mut self.state);
+        self.folder.poll_loading(&mut self.state, ui.ctx());
         self.drain_pending_drops(ui.ctx());
-        self.drain_pending_thumbnails(ui.ctx());
+        self.folder.drain_thumbnails(&mut self.state, ui.ctx());
 
         egui::CentralPanel::default().show(ui, |ui| {
             let actions = image_grid(
@@ -696,7 +361,7 @@ impl eframe::App for MmCompare {
                 self.loading_total - self.loading_received,
             );
             for action in actions {
-                self.handle_folder_action(action, ui.ctx());
+                self.folder.handle_action(&mut self.state, action, ui.ctx());
             }
         });
     }
@@ -849,7 +514,7 @@ pub fn image_grid(
                     {
                         state.pending_remove.push(cell_pos);
                     }
-                    let action = imcell::render_folder_cell(
+                    let action = folder::render_folder_cell(
                         ui,
                         &mut state.folder_cells[folder_idx],
                         cell_rect,
