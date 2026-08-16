@@ -52,7 +52,8 @@ jobs:
       - name: Fetch FFmpeg (macOS)
         if: runner.os == 'macOS'
         run: |
-          brew install ffmpeg
+          set -o pipefail
+          brew install ffmpeg 2>&1 | tail -40
           major=$(ffmpeg -version | head -1 | sed -n 's/.*version \([0-9]*\).*/\1/p')
           echo "FFmpeg major version: $major"
           if [ "$major" -lt 9 ]; then echo "FFmpeg >= 9.0 required"; exit 1; fi
