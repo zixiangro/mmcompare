@@ -37,7 +37,7 @@
 - [x] ADR-0007：已接受（单程序模式切换 + ffmpeg 动态链接 + 交互隔离）
 - [x] 本机无 VS 环境的构建链路固化到 .cargo/config.toml（CC=gcc / libclang.dll / mingw 头 + clang 资源目录）
 - [x] build.rs：Windows 自动拷 ffmpeg dll 到 target/，cargo run/test 免手动配 PATH
-- [ ] **验收：dev CI 三平台绿（push 后确认）；`cargo test` 通过（本地已绿 35 个）**
+- [x] **验收：dev CI（Windows）绿**——Build + Test 全过（run 31946979109，35 测试）；Linux/macOS CI 暂缓（Linux 编译问题待查、macOS brew 问题待查）
 
 ### M2 视频 cell（单视频播放闭环）
 

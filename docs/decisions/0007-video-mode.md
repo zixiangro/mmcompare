@@ -26,8 +26,8 @@ UI 层 90% 共享（布局/键盘/拖拽/管线/文件夹/横幅），两程序�
 - 只启用 `format` + `software-scaling` features（裁掉 device/filter/swresample，无音频）
 - 只初始化视频流（D5）
 - Windows: gyan.dev full_build-shared 9.0.1（MSVC .lib + include，GPL 构建）；
-  运行 dll 由 build.rs 拷到 target/ 目录
-- Linux: BtbN linux64-lgpl-shared（master 9.x，.so + include），CI 用 LD_LIBRARY_PATH
+  运行 dll 由 build.rs 拷到 target/ 目录；**CI 已验证（Build + Test 全绿）**
+- Linux: **暂缓**。BtbN linux64-lgpl-shared 下载/解压已通，bindgen 编译失败原因待查
 - macOS: **暂缓**。brew install ffmpeg 在 Actions runner 上 6s 即失败（原因未明）；后备方案：Homebrew bottle 直下（ffmpeg 9.0.1，arm64_sequoia/tahoe digest 已备）
 - 本机开发环境（无 VS）：CC=gcc + mingw 头文件 + pip libclang.dll + clang 内置头
   资源目录，全部配置在 `.cargo/config.toml`（force=false，CI 可覆盖）
@@ -47,7 +47,7 @@ Ctrl+箭头只调 hover 视频）；屏蔽 E/H/P 与重排；MAX_VIDEOS=4；Esc 
   - 构建环境复杂：本机无 VS 时需 CC/libclang/mingw 头文件三重配置（已固化到
     .cargo/config.toml，新机器照抄）
 - 风险：
-  - macOS CI 未验证（暂缓，bottle 方案待启用）
+  - Linux/macOS CI 未验证（暂缓；Linux bindgen 编译失败、macOS brew 失败均待查）
   - 静态链接裁剪（体积优化）留待后续；当前动态链接 dll 分发
 
 ## 备选方案（Alternatives）
