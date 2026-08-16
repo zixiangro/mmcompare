@@ -21,6 +21,9 @@ pub struct VideoInfo {
     pub height: u32,
     pub duration_secs: f64,
     pub frame_rate: f64,
+    /// 容器旋转元数据（0/90/180/270，顺时针；无元数据 = 0）。
+    /// 解码帧已按此值旋转，width/height 是旋转后的显示尺寸。
+    pub rotation: i32,
 }
 
 pub struct DecodedFrame {
@@ -40,7 +43,68 @@ pub struct VideoDecoder {
     info: VideoInfo,
     dst_w: u32,
     dst_h: u32,
+    rotation: i32,
     eof: bool,
+}
+
+/// 读取流的显示旋转（度）：display matrix 的 (b, a) 反正切，量化到 90° 步长。
+/// 无元数据返回 0。矩阵值为主机字节序 i32（16.16 定点）。
+fn stream_rotation(stream: &ffmpeg::format::stream::Stream) -> i32 {
+    use ffmpeg::codec::packet::side_data::Type;
+    for sd in stream.side_data() {
+        if sd.kind() == Type::DisplayMatrix {
+            let d = sd.data();
+            if d.len() >= 36 {
+                let m: Vec<i32> = d[..36]
+                    .chunks_exact(4)
+                    .map(|c| i32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let (a, b) = (m[0] as f64 / 65536.0, m[1] as f64 / 65536.0);
+                let deg = b.atan2(a).to_degrees().round() as i32;
+                return ((deg + 45) / 90 * 90).rem_euclid(360);
+            }
+        }
+    }
+    0
+}
+
+/// RGB24 顺时针旋转 90°：原 (x,y) → 新 (h-1-y, x)，尺寸 w×h → h×w。
+fn rotate_rgb_90_cw(rgb: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; rgb.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let src = ((y * w + x) * 3) as usize;
+            let dst = (((h - 1 - y) + x * h) * 3) as usize;
+            out[dst..dst + 3].copy_from_slice(&rgb[src..src + 3]);
+        }
+    }
+    out
+}
+
+/// RGB24 逆时针旋转 90°：原 (x,y) → 新 (y, w-1-x)。
+fn rotate_rgb_90_ccw(rgb: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; rgb.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let src = ((y * w + x) * 3) as usize;
+            let dst = ((y + (w - 1 - x) * h) * 3) as usize;
+            out[dst..dst + 3].copy_from_slice(&rgb[src..src + 3]);
+        }
+    }
+    out
+}
+
+/// RGB24 旋转 180°：原 (x,y) → 新 (w-1-x, h-1-y)。
+fn rotate_rgb_180(rgb: &[u8], w: u32, h: u32) -> Vec<u8> {
+    let mut out = vec![0u8; rgb.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let src = ((y * w + x) * 3) as usize;
+            let dst = (((h - 1 - y) * w + (w - 1 - x)) * 3) as usize;
+            out[dst..dst + 3].copy_from_slice(&rgb[src..src + 3]);
+        }
+    }
+    out
 }
 
 impl VideoDecoder {
@@ -51,6 +115,7 @@ impl VideoDecoder {
             .streams()
             .best(ffmpeg::media::Type::Video)
             .ok_or(ffmpeg::Error::StreamNotFound)?;
+        let rotation = stream_rotation(&stream);
         let (stream_index, time_base, duration, frame_rate, parameters) = {
             let ffmpeg::Rational(tb_num, tb_den) = stream.time_base();
             let ffmpeg::Rational(fr_num, fr_den) = stream.avg_frame_rate();
@@ -82,6 +147,12 @@ impl VideoDecoder {
             ((src_w as f64 * scale).round() as u32).max(1),
             ((src_h as f64 * scale).round() as u32).max(1),
         );
+        // 旋转 90/270 时显示尺寸交换（解码帧在输出后旋转，缩放按原始方向计算）
+        let (dst_w, dst_h) = if rotation % 180 == 90 {
+            (dst_h, dst_w)
+        } else {
+            (dst_w, dst_h)
+        };
         Ok(Self {
             ictx,
             stream_index,
@@ -92,9 +163,11 @@ impl VideoDecoder {
                 height: dst_h,
                 duration_secs: duration,
                 frame_rate,
+                rotation,
             },
             dst_w,
             dst_h,
+            rotation,
             eof: false,
         })
     }
@@ -184,11 +257,30 @@ impl VideoDecoder {
                         [i * rgb.stride(0)..i * rgb.stride(0) + self.dst_w as usize * 3];
                     buf.extend_from_slice(row);
                 }
+                // 应用容器旋转元数据（手机竖拍方向正确显示）
+                let (buf, w, h) = match self.rotation {
+                    90 => (
+                        rotate_rgb_90_cw(&buf, self.dst_w, self.dst_h),
+                        self.dst_h,
+                        self.dst_w,
+                    ),
+                    180 => (
+                        rotate_rgb_180(&buf, self.dst_w, self.dst_h),
+                        self.dst_w,
+                        self.dst_h,
+                    ),
+                    270 => (
+                        rotate_rgb_90_ccw(&buf, self.dst_w, self.dst_h),
+                        self.dst_h,
+                        self.dst_w,
+                    ),
+                    _ => (buf, self.dst_w, self.dst_h),
+                };
                 if !on_frame(DecodedFrame {
                     pts_secs: pts,
                     rgb: buf,
-                    width: self.dst_w,
-                    height: self.dst_h,
+                    width: w,
+                    height: h,
                 }) {
                     return Ok(());
                 }
@@ -276,6 +368,46 @@ mod tests {
         assert_eq!(pts.len(), 5);
         assert!(pts.windows(2).all(|w| w[1] > w[0]), "pts increasing");
         assert!((pts[1] - pts[0] - 1.0 / 30.0).abs() < 0.05, "30fps cadence");
+    }
+
+    #[test]
+    fn rotation_metadata_is_applied() {
+        // sample_rot90.mp4：蓝底 + 左上 80x80 白块，tkhd matrix 旋转 90（顺时针）
+        let dec = VideoDecoder::open(Path::new("tests/fixtures/sample_rot90.mp4"), 0)
+            .expect("open failed");
+        let info = dec.info();
+        assert_eq!((info.width, info.height), (240, 320), "旋转后显示尺寸交换");
+        let (_, buf) =
+            first_frame(Path::new("tests/fixtures/sample_rot90.mp4"), 0).expect("rotated frame");
+        let px = |x: usize, y: usize| {
+            [
+                buf[(y * 240 + x) * 3],
+                buf[(y * 240 + x) * 3 + 1],
+                buf[(y * 240 + x) * 3 + 2],
+            ]
+        };
+        // x264 有损压缩：颜色比较带容差
+        let close = |a: [u8; 3], b: [u8; 3]| {
+            a.iter()
+                .zip(b)
+                .all(|(x, y)| (*x as i32 - y as i32).abs() <= 8)
+        };
+        assert!(close(px(0, 0), [0, 0, 255]), "左上仍为蓝底: {:?}", px(0, 0));
+        assert!(
+            close(px(239, 0), [255, 255, 255]),
+            "右上应为白块（原左上 90° 顺时针）: {:?}",
+            px(239, 0)
+        );
+        assert!(
+            close(px(0, 319), [0, 0, 255]),
+            "左下仍为蓝底: {:?}",
+            px(0, 319)
+        );
+        assert!(
+            close(px(239, 319), [0, 0, 255]),
+            "右下仍为蓝底: {:?}",
+            px(239, 319)
+        );
     }
 
     #[test]

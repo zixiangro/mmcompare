@@ -48,7 +48,10 @@
 - [x] 播放时钟：帧驱动（worker 按帧率发帧，position 跟随 pts；暂停时 seek/步进由单帧 worker 完成）
 - [x] 交互 D1：Space 播放/暂停；`←`/`→` ±5s；`↑`/`↓` 帧步进；`Ctrl`+箭头仅调 hover 视频
 - [x] 交互 D2：视频模式屏蔽 E/H/P（is_all_images=false 自然隔离）、无缩放平移/重排
+- [x] 默认方向：读取 display matrix（rotation 元数据），解码帧按 90/180/270 旋转（手机竖拍正放）；fixture + 像素方向测试
+- [ ] ~~数字键旋转视频~~：已砍（需求不大，用户确认）
 - [x] 失败路径：首帧失败进 `load_errors` + 移除 loaded_paths（重拖重试）；播放中失败标记 cell.failed
+- [ ] 性能：目前 **CPU 软解**（avcodec + swscale），非 GPU 解码；4K 高码率可能吃力，M5 评估硬件解码（DXVA）
 - [ ] **验收：GUI 手动验证**（拖入 sample 或真实视频：播放/暂停/seek/步进/进度条/删除）；CI 已跑（44 测试）
 - [ ] Esc 返回文件夹视图：M2 无文件夹来源的视频，留 M4（对比对）一并做
 
