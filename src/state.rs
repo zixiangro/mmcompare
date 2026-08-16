@@ -157,7 +157,8 @@ impl AppState {
     ///
     /// 打开限制：**多文件夹（≥2）时每文件夹限 1 张**——重复打开同文件夹
     /// 条目自动替换已有图片（不新增 cell）；**单文件夹可开多张**（唯一
-    /// 支持多图的场景）。网格已满时拒绝；打开后从网格隐藏该文件夹 cell。
+    /// 支持多图的场景）。网格满时仍允许打开**可见**文件夹的条目
+    /// （打开后文件夹隐藏，净增 0 格）；打开后从网格隐藏该文件夹 cell。
     pub fn open_folder_entry(&mut self, folder_idx: usize, entry_idx: usize, info: ImageInfo) {
         if self.folder_cells.len() >= 2
             && let Some(pos) = self.image_cells.iter().position(|c| {
@@ -181,7 +182,12 @@ impl AppState {
             self.folder_cells[folder_idx].open_entry = Some(entry_idx);
             return;
         }
-        if self.cell_order.len() >= MAX_IMAGES {
+        // 打开后：图片 +1，文件夹若可见则隐藏 -1，净增 = 1 - 可见性
+        let folder_visible = self
+            .cell_order
+            .iter()
+            .any(|c| matches!(c, CellKind::Folder(fi) if *fi == folder_idx));
+        if self.cell_order.len() + 1 - usize::from(folder_visible) > MAX_IMAGES {
             return;
         }
         let img_idx = self.image_cells.len();
@@ -613,5 +619,38 @@ mod tests {
         // 破坏对比对（删掉一侧）→ 可删恢复
         s.remove_cell(image_pos(&s, 0));
         assert!(!s.is_compare_pair());
+    }
+    #[test]
+    fn open_at_full_grid_when_folder_visible() {
+        // 网格满（8 格）但文件夹可见：打开条目应成功（文件夹隐藏腾 1 格，净 0 变化）
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fi = add_folder(&mut s, 5);
+        let infos: Vec<ImageInfo> = (0..7).map(|i| make_info(&ctx, &format!("s{i}"))).collect();
+        s.append_standalone_images(infos);
+        assert_eq!(s.cell_order.len(), 8, "1 folder + 7 standalone 满格");
+        s.open_folder_entry(fi, 0, make_info(&ctx, "f0"));
+        assert_eq!(s.image_cells.len(), 8, "打开成功");
+        assert_eq!(s.cell_order.len(), 8, "folder 隐藏，格数不变");
+    }
+
+    #[test]
+    fn open_rejected_when_folder_hidden_at_full_grid() {
+        // 单文件夹开满 8 张（folder 已隐藏）后再开：应拒绝（净增 1 → 超限）
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fi = add_folder(&mut s, 20);
+        for i in 0..8 {
+            s.open_folder_entry(fi, i, make_info(&ctx, &format!("f{i}")));
+        }
+        assert_eq!(s.image_cells.len(), 8);
+        assert!(
+            !s.cell_order
+                .iter()
+                .any(|c| matches!(c, CellKind::Folder(f) if *f == fi)),
+            "folder 已隐藏"
+        );
+        s.open_folder_entry(fi, 8, make_info(&ctx, "f8"));
+        assert_eq!(s.image_cells.len(), 8, "第 9 张被拒");
     }
 }
