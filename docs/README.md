@@ -1,6 +1,6 @@
 # 文档地图
 
-> 状态: 稳定 | 更新: 2026-07-31
+> 状态: 稳定 | 更新: 2026-08-16
 
 本目录是 mmcompare 的唯一文档入口。**AGENTS.md 是工程手册（给开发者和 AI 协作代理看的入口），本文件是技术文档的索引。** 原则：单一事实来源（Single Source of Truth）——同一份知识只在一处详细描述，其余位置用链接引用。
 
@@ -11,6 +11,7 @@
 | [architecture.md](architecture.md) | 稳定 | 分层、数据流、模块职责 | 新增/删除模块、跨层调用关系变化 |
 | [loading.md](loading.md) | 稳定 | 图片加载管线：线程模型、通信、失败处理 | 加载流程、线程模型、载荷类型变化 |
 | [layout.md](layout.md) | 稳定 | 网格布局算法、坐标计算、常量 | 布局规则、常量（SEP/MARGIN）变化 |
+| [folder.md](folder.md) | 稳定 | 文件夹 cell：扫描、缩略图、打开/导航 | 文件夹交互、加载目标变化 |
 | [local-mode.md](local-mode.md) | 稳定 | 局部模式、归一化坐标、亮度计算 | 选择框交互、统计公式变化 |
 | [egui-api.md](egui-api.md) | 参考 | egui 0.35 与旧版 API 差异备忘 | egui 版本升级、踩到新的 API 坑 |
 | [decisions/](decisions/README.md) | 稳定 | 架构决策记录（ADR） | 新架构决策；既有决策被推翻时更新对应 ADR |

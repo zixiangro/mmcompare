@@ -24,6 +24,21 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
+/// 解码并缩放到方形缩略图（文件夹列表/网格预览用）。
+///
+/// `resize_exact` 不保持宽高比（缩略图区域本来就是方形），
+/// 调用方负责设置 `path`。
+pub fn decode_thumbnail_bytes(bytes: &[u8], size: u32) -> Option<DecodedImage> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let img = img.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
+    let img = img.to_rgba8();
+    Some(DecodedImage {
+        rgba: img.into_raw(),
+        size: [size as usize, size as usize],
+        path: PathBuf::new(),
+    })
+}
+
 pub fn rotate_rgba_90_cw(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, [usize; 2]) {
     let mut out = vec![0u8; w * h * 4];
     for y in 0..h {

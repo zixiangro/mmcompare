@@ -1,32 +1,38 @@
 //! 统筹层：加载管线、键盘事件、窗口标题、网格布局与交互编排。
 //!
-//! 本模块是应用主体（`MmCompare`），统筹**所有** imcell：布局怎么排、
-//! 交互怎么响应、图片怎么加载，全部在这里编排。`imcell` 只负责
-//! "给定一个格子矩形，把单张图片画好"，不关心自己在哪、不关心有几个格子。
+//! 本模块是应用主体（`MmCompare`），管理**所有** cell（图片 cell 与
+//! 文件夹 cell）：布局怎么排、交互怎么响应、图片怎么加载、文件夹怎么
+//! 扫描/打开/导航，全部在这里编排。`imcell` 只负责"给定一个格子矩形，
+//! 把一个 cell 画好"，不关心自己在哪、不关心有几个格子。
 //!
 //! 这是全项目**唯一**允许出现线程原语的地方（ADR-0001）：
 //! 解码线程从这里 spawn，也只在 `poll_loading` 收结果。其余模块
 //! （state/core/imcell）永远运行在主线程，不需要考虑线程安全。
 //!
-//! 加载是一个"批次"状态机，状态分散在四个字段里，必须合起来看：
+//! 加载是一个"批次"状态机，状态分散在几个字段里，必须合起来看：
 //! - `load_rx`：有值 = 正在加载（`is_loading()` 据此判断）；
 //! - `loading_total` / `loading_received`：本批计划数 / 已收到数，相等即批次完成；
 //! - `loading_buf`：按加载顺序占位的缓冲，图片到达后立刻上传纹理填入槽位，
-//!   批次完成时按序取走（失败的槽位是 `None`，直接跳过）。
+//!   批次完成时按 `load_target` 分发（独立图片 / 文件夹缩略图 / 打开条目 / 导航）；
+//! - `pending_drops` / `pending_thumbnails`：加载期间收到的拖拽与待缩略图目录，
+//!   批次完成后按序处理，避免请求互相覆盖。
 //!
 //! 布局采用完全手动坐标（ADR-0002）：只算 cell 位置、画分隔线、编排交互，
-//! 图片怎么画委托给 `imcell`。交互状态变更集中在帧末统一应用
+//! cell 怎么画委托给 `imcell`。交互状态变更集中在帧末统一应用
 //! （`PanFeedback` 模式），避免渲染中途改状态。
 //!
 //! 完整流程见 docs/loading.md 与 docs/layout.md。
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use eframe::egui;
 
 use crate::core;
-use crate::state::{AppState, CellKind, ImageInfo, MAX_IMAGES};
+use crate::state::{
+    AppState, CellKind, FolderAction, FolderCell, FolderView, ImageInfo, ImageSource, MAX_IMAGES,
+};
 
 use super::imcell;
 
@@ -35,13 +41,27 @@ const MARGIN: f32 = 6.0;
 
 type LoadResult = Result<(core::image::DecodedImage, String, [u32; 256]), PathBuf>;
 
+/// 本批加载结果的分发目标。
+enum LoadTarget {
+    Standalone,
+    Thumbnails(usize),
+    OpenEntry(usize, usize),
+    OpenEntries {
+        folder_idx: usize,
+        entry_idxs: Vec<usize>,
+    },
+    Navigate(usize, usize, usize),
+}
+
 pub struct MmCompare {
     state: AppState,
     load_rx: Option<mpsc::Receiver<(usize, LoadResult)>>,
     loading_total: usize,
     loading_received: usize,
     loading_buf: Vec<Option<ImageInfo>>,
+    load_target: Option<LoadTarget>,
     pending_drops: Vec<PathBuf>,
+    pending_thumbnails: Vec<usize>,
 }
 
 impl Default for MmCompare {
@@ -52,7 +72,9 @@ impl Default for MmCompare {
             loading_total: 0,
             loading_received: 0,
             loading_buf: Vec::new(),
+            load_target: None,
             pending_drops: Vec::new(),
+            pending_thumbnails: Vec::new(),
         }
     }
 }
@@ -79,66 +101,131 @@ impl MmCompare {
         self.load_rx.is_some()
     }
 
-    fn filter_paths(&mut self, paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    /// 把输入路径分类为图片文件与文件夹（去重、排序、标记、截断名额），
+    /// 文件路径立即标记进 `loaded_paths`，避免同批重复入队。
+    fn classify_paths(&mut self, paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let remaining = MAX_IMAGES
             .saturating_sub(self.state.cell_order.len())
             .saturating_sub(self.loading_total);
-        let mut paths: Vec<PathBuf> = paths
-            .into_iter()
-            .filter(|p| is_image_ext(p) && !self.state.loaded_paths.contains(p))
-            .take(remaining)
-            .collect();
-        sort_paths(&mut paths);
-        for p in &paths {
+        let mut file_paths = Vec::new();
+        let mut folder_paths = Vec::new();
+        for p in paths.into_iter().take(remaining) {
+            if p.is_dir() {
+                if !self.state.folder_cells.iter().any(|fc| fc.dir_path == p) {
+                    folder_paths.push(p);
+                }
+            } else if is_image_ext(&p) && !self.state.loaded_paths.contains(&p) {
+                file_paths.push(p);
+            }
+        }
+        sort_paths(&mut file_paths);
+        for p in &file_paths {
             self.state.loaded_paths.insert(p.clone());
         }
-        paths
+        (file_paths, folder_paths)
     }
 
     pub fn load_startup_paths(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
-        let paths = self.filter_paths(paths);
-        if paths.is_empty() {
-            return;
+        let (file_paths, folder_paths) = self.classify_paths(paths);
+        if !file_paths.is_empty() {
+            self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
         }
-        self.spawn_loaders(paths, ctx);
+        for dir in folder_paths {
+            self.add_folder_cell(dir);
+        }
     }
 
+    /// 读取本帧的拖拽事件（egui 的 `dropped_files` 只保留一帧，读走即失）。
     fn poll_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
             return;
         }
         let paths = dropped.into_iter().filter_map(|f| f.path).collect();
-        let paths = self.filter_paths(paths);
-        if paths.is_empty() {
+        let (file_paths, folder_paths) = self.classify_paths(paths);
+        if file_paths.is_empty() && folder_paths.is_empty() {
             return;
         }
         if self.is_loading() {
-            self.pending_drops.extend(paths);
+            self.pending_drops.extend(file_paths);
+            self.pending_drops.extend(folder_paths);
         } else {
-            self.spawn_loaders(paths, ctx);
+            if !file_paths.is_empty() {
+                self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
+            }
+            for dir in folder_paths {
+                self.add_folder_cell(dir);
+            }
         }
     }
 
+    /// 加载完成后，把缓存中的拖拽路径启动为新一批加载（重新分类：
+    /// 缓存期间格子可能已被删除/加满，名额变了）。
     fn drain_pending_drops(&mut self, ctx: &egui::Context) {
         if self.is_loading() || self.pending_drops.is_empty() {
             return;
         }
-        let remaining = MAX_IMAGES
-            .saturating_sub(self.state.cell_order.len())
-            .saturating_sub(self.loading_total);
-        let mut paths = std::mem::take(&mut self.pending_drops);
-        paths.truncate(remaining);
-        if !paths.is_empty() {
-            self.spawn_loaders(paths, ctx);
+        let paths = std::mem::take(&mut self.pending_drops);
+        let (file_paths, folder_paths) = self.classify_paths(paths);
+        if !file_paths.is_empty() {
+            self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
+        }
+        for dir in folder_paths {
+            self.add_folder_cell(dir);
         }
     }
 
-    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context) {
+    /// 扫描目录并登记一个文件夹 cell；缩略图加载排队到 `pending_thumbnails`。
+    fn add_folder_cell(&mut self, dir: PathBuf) {
+        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| is_image_ext(p))
+                .collect(),
+            Err(_) => return,
+        };
+        sort_paths(&mut entries);
+        let idx = self.state.folder_cells.len();
+        self.state.folder_cells.push(FolderCell {
+            dir_path: dir,
+            entries,
+            selected: HashSet::new(),
+            view_mode: FolderView::List,
+            scroll_offset: 0.0,
+            thumbnails: Vec::new(),
+            open_entry: None,
+        });
+        self.state.cell_order.push(CellKind::Folder(idx));
+        self.state.pan_offset.push([0.0, 0.0]);
+        self.pending_thumbnails.push(idx);
+    }
+
+    /// 为排队中的文件夹启动缩略图批次（每帧检查，加载空闲时执行）。
+    fn drain_pending_thumbnails(&mut self, ctx: &egui::Context) {
+        if self.is_loading() || self.pending_thumbnails.is_empty() {
+            return;
+        }
+        let fi = self.pending_thumbnails.remove(0);
+        let entries = match self.state.folder_cells.get(fi) {
+            Some(f) => f.entries.clone(),
+            None => return,
+        };
+        if entries.is_empty() {
+            return;
+        }
+        self.spawn_loaders(entries, ctx, LoadTarget::Thumbnails(fi));
+    }
+
+    /// 启动一批加载：每张图一个临时线程。`thumb` 模式解码 64x64 缩略图，
+    /// 不提取 EXIF/直方图（缩略图用不到）。
+    fn spawn_loaders(&mut self, paths: Vec<PathBuf>, ctx: &egui::Context, target: LoadTarget) {
         self.loading_total = paths.len();
         self.loading_received = 0;
         self.loading_buf = (0..paths.len()).map(|_| None).collect();
         self.state.load_errors.clear();
+        let thumb = matches!(target, LoadTarget::Thumbnails(_));
+        self.load_target = Some(target);
         let (tx, rx) = mpsc::channel();
 
         for (i, p) in paths.into_iter().enumerate() {
@@ -149,13 +236,28 @@ impl MmCompare {
                         log::warn!("read failed {}: {}", p.display(), e);
                         p.clone()
                     })?;
-                    let mut img = core::image::decode_image_bytes(&bytes).ok_or_else(|| {
-                        log::warn!("decode failed {}", p.display());
-                        p.clone()
-                    })?;
+                    let mut img = if thumb {
+                        core::image::decode_thumbnail_bytes(&bytes, 64).ok_or_else(|| {
+                            log::warn!("thumb decode failed {}", p.display());
+                            p.clone()
+                        })?
+                    } else {
+                        core::image::decode_image_bytes(&bytes).ok_or_else(|| {
+                            log::warn!("decode failed {}", p.display());
+                            p.clone()
+                        })?
+                    };
                     img.path = p.clone();
-                    let exif = core::image::extract_exif(&bytes);
-                    let histogram = core::image::compute_y_histogram(&img.rgba);
+                    let exif = if thumb {
+                        String::new()
+                    } else {
+                        core::image::extract_exif(&bytes)
+                    };
+                    let histogram = if thumb {
+                        [0u32; 256]
+                    } else {
+                        core::image::compute_y_histogram(&img.rgba)
+                    };
                     Ok((img, exif, histogram))
                 })();
                 tx.send((i, result)).ok();
@@ -167,6 +269,7 @@ impl MmCompare {
         ctx.request_repaint();
     }
 
+    /// 每帧把已完成的解码结果搬进 state，收齐后按 `load_target` 分发。
     fn poll_loading(&mut self, ctx: &egui::Context) {
         let Some(rx) = &self.load_rx else {
             return;
@@ -200,9 +303,47 @@ impl MmCompare {
 
         if self.loading_received >= self.loading_total {
             let buf = std::mem::take(&mut self.loading_buf);
-            let infos: Vec<ImageInfo> = buf.into_iter().flatten().collect();
-            self.state.append_standalone_images(infos);
-
+            match self.load_target.take() {
+                Some(LoadTarget::Thumbnails(folder_idx)) => {
+                    if let Some(folder) = self.state.folder_cells.get_mut(folder_idx) {
+                        for slot in buf {
+                            folder.thumbnails.push(slot.map(|info| info.texture));
+                        }
+                    }
+                }
+                Some(LoadTarget::OpenEntry(folder_idx, entry_idx)) => {
+                    if let Some(Some(info)) = buf.into_iter().next()
+                        && folder_idx < self.state.folder_cells.len()
+                    {
+                        self.state.open_folder_entry(folder_idx, entry_idx, info);
+                    }
+                }
+                Some(LoadTarget::OpenEntries {
+                    folder_idx,
+                    entry_idxs,
+                }) => {
+                    if folder_idx < self.state.folder_cells.len() {
+                        for (i, slot) in buf.into_iter().enumerate() {
+                            if let (Some(info), Some(&ei)) = (slot, entry_idxs.get(i)) {
+                                self.state.open_folder_entry(folder_idx, ei, info);
+                            }
+                        }
+                    }
+                }
+                Some(LoadTarget::Navigate(img_idx, folder_idx, entry_idx)) => {
+                    if let Some(Some(info)) = buf.into_iter().next()
+                        && img_idx < self.state.image_cells.len()
+                        && folder_idx < self.state.folder_cells.len()
+                    {
+                        self.state
+                            .apply_navigated_image(img_idx, folder_idx, entry_idx, info);
+                    }
+                }
+                _ => {
+                    let infos: Vec<ImageInfo> = buf.into_iter().flatten().collect();
+                    self.state.append_standalone_images(infos);
+                }
+            }
             self.load_rx = None;
             self.loading_total = 0;
             self.loading_received = 0;
@@ -217,6 +358,105 @@ impl MmCompare {
         };
         self.state.image_cells[img_idx].info = new_info;
         self.state.invalidate_selection_after_rotation(img_idx);
+    }
+
+    fn handle_folder_action(&mut self, action: FolderAction, ctx: &egui::Context) {
+        match action {
+            FolderAction::OpenImage(idx) => {
+                for pos in 0..self.state.cell_order.len() {
+                    if let CellKind::Folder(fi) = self.state.cell_order[pos]
+                        && idx < self.state.folder_cells[fi].entries.len()
+                    {
+                        let path = self.state.folder_cells[fi].entries[idx].clone();
+                        if !self.is_loading() {
+                            self.spawn_loaders(vec![path], ctx, LoadTarget::OpenEntry(fi, idx));
+                        }
+                        break;
+                    }
+                }
+            }
+            FolderAction::OpenFolder(path) => {
+                #[cfg(target_os = "windows")]
+                {
+                    let _ = std::process::Command::new("explorer")
+                        .arg("/select,")
+                        .arg(&path)
+                        .spawn();
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    let _ = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&path)
+                        .spawn();
+                }
+                #[cfg(target_os = "linux")]
+                {
+                    if let Some(p) = path.parent() {
+                        let _ = std::process::Command::new("xdg-open").arg(p).spawn();
+                    }
+                }
+            }
+            FolderAction::Remove(idx) => {
+                for pos in 0..self.state.cell_order.len() {
+                    if let CellKind::Folder(fi) = self.state.cell_order[pos] {
+                        let f = &mut self.state.folder_cells[fi];
+                        if idx < f.entries.len() {
+                            f.entries.remove(idx);
+                            f.selected.remove(&idx);
+                            let sel: Vec<usize> = f.selected.iter().copied().collect();
+                            f.selected.clear();
+                            for s in sel {
+                                f.selected.insert(if s > idx { s - 1 } else { s });
+                            }
+                            if idx < f.thumbnails.len() {
+                                f.thumbnails.remove(idx);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            FolderAction::OpenSelected => {
+                for pos in 0..self.state.cell_order.len() {
+                    if let CellKind::Folder(fi) = self.state.cell_order[pos] {
+                        let sel: Vec<usize> = self.state.folder_cells[fi]
+                            .selected
+                            .iter()
+                            .copied()
+                            .collect();
+                        if !sel.is_empty() && !self.is_loading() {
+                            let paths: Vec<PathBuf> = sel
+                                .iter()
+                                .map(|&i| self.state.folder_cells[fi].entries[i].clone())
+                                .collect();
+                            self.spawn_loaders(
+                                paths,
+                                ctx,
+                                LoadTarget::OpenEntries {
+                                    folder_idx: fi,
+                                    entry_idxs: sel,
+                                },
+                            );
+                        }
+                        break;
+                    }
+                }
+            }
+            FolderAction::ToggleView => {
+                for pos in 0..self.state.cell_order.len() {
+                    if let CellKind::Folder(fi) = self.state.cell_order[pos] {
+                        let f = &mut self.state.folder_cells[fi];
+                        f.view_mode = match f.view_mode {
+                            FolderView::List => FolderView::Thumbnail,
+                            FolderView::Thumbnail => FolderView::List,
+                        };
+                        break;
+                    }
+                }
+            }
+            FolderAction::None => {}
+        }
     }
 }
 
@@ -269,9 +509,68 @@ impl eframe::App for MmCompare {
                 changed = true;
             }
             for idx in nums {
-                if idx < self.state.cell_order.len() {
-                    let CellKind::Image(img_idx) = self.state.cell_order[idx];
+                if idx < self.state.cell_order.len()
+                    && let CellKind::Image(img_idx) = self.state.cell_order[idx]
+                    && matches!(
+                        self.state.image_cells[img_idx].source,
+                        ImageSource::Standalone
+                    )
+                {
                     self.rotate_image_cell(img_idx, ui.ctx());
+                }
+            }
+        }
+
+        let (space, b_key, esc) = ui.input(|i| {
+            (
+                i.key_pressed(egui::Key::Space),
+                i.key_pressed(egui::Key::B),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if space || b_key || esc {
+            if esc {
+                let mut to_close: Vec<usize> = (0..self.state.cell_order.len())
+                    .filter(|pos| {
+                        matches!(
+                            self.state.cell_order[*pos],
+                            CellKind::Image(img_idx)
+                                if matches!(
+                                    self.state.image_cells[img_idx].source,
+                                    ImageSource::FromFolder { .. }
+                                )
+                        )
+                    })
+                    .collect();
+                to_close.sort_unstable();
+                for pos in to_close.into_iter().rev() {
+                    self.state.close_folder_at_pos(pos);
+                }
+                changed = true;
+            } else if !self.is_loading() {
+                let delta: i32 = if space { 1 } else { -1 };
+                let mut nav = None;
+                for kind in self.state.cell_order.iter() {
+                    if let CellKind::Image(img_idx) = kind
+                        && let Some(t) = self.state.folder_nav_target(*img_idx, delta)
+                    {
+                        nav = Some((*img_idx, t));
+                        break;
+                    }
+                }
+                if let Some((img_idx, (folder_idx, entry_idx, path))) = nav {
+                    self.spawn_loaders(
+                        vec![path],
+                        ui.ctx(),
+                        LoadTarget::Navigate(img_idx, folder_idx, entry_idx),
+                    );
+                } else if space {
+                    for fi in 0..self.state.folder_cells.len() {
+                        if !self.state.folder_cells[fi].selected.is_empty() {
+                            self.handle_folder_action(FolderAction::OpenSelected, ui.ctx());
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -299,13 +598,17 @@ impl eframe::App for MmCompare {
         self.poll_drops(ui.ctx());
         self.poll_loading(ui.ctx());
         self.drain_pending_drops(ui.ctx());
+        self.drain_pending_thumbnails(ui.ctx());
 
         egui::CentralPanel::default().show(ui, |ui| {
-            image_grid(
+            let actions = image_grid(
                 ui,
                 &mut self.state,
                 self.loading_total - self.loading_received,
             );
+            for action in actions {
+                self.handle_folder_action(action, ui.ctx());
+            }
         });
     }
 }
@@ -330,7 +633,11 @@ struct PanFeedback {
     snapshots: Vec<CellSnapshot>,
 }
 
-pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize) {
+pub fn image_grid(
+    ui: &mut egui::Ui,
+    state: &mut AppState,
+    loading_count: usize,
+) -> Vec<FolderAction> {
     if loading_count > 0 {
         ui.ctx().request_repaint();
     }
@@ -343,7 +650,10 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
             } else {
                 ui.label(egui::RichText::new("MMCompare").size(24.0).strong());
                 ui.add_space(12.0);
-                ui.label(format!("Drag images here to view  (max {})", MAX_IMAGES));
+                ui.label(format!(
+                    "Drag images or folders here to view  (max {})",
+                    MAX_IMAGES
+                ));
                 ui.add_space(6.0);
                 ui.label("P: Local mode   E: EXIF   H: Histogram");
                 ui.label(format!(
@@ -354,7 +664,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 ui.hyperlink_to("Project Homepage", "https://github.com/zixiangro/mmcompare");
             }
         });
-        return;
+        return Vec::new();
     }
 
     let n = state.cell_order.len();
@@ -390,6 +700,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
         drag_delta_acc: [0.0, 0.0],
         snapshots: Vec::with_capacity(n),
     };
+    let mut folder_actions: Vec<FolderAction> = Vec::new();
 
     let mut offset = 0;
     for (row_idx, &col_count) in layout.row_layout.iter().enumerate() {
@@ -421,22 +732,44 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
                 egui::vec2(layout.cell_w, layout.row_h),
             );
 
-            let Some(&CellKind::Image(img_idx)) = state.cell_order.get(cell_pos) else {
+            let Some(&cell_kind) = state.cell_order.get(cell_pos) else {
                 x += layout.cell_w;
                 continue;
             };
 
-            render_image_cell(
-                ui,
-                state,
-                cell_rect,
-                cell_pos,
-                img_idx,
-                ctrl,
-                all_images,
-                &layout,
-                &mut feedback,
-            );
+            match cell_kind {
+                CellKind::Image(img_idx) => {
+                    render_image_cell(
+                        ui,
+                        state,
+                        cell_rect,
+                        cell_pos,
+                        img_idx,
+                        ctrl,
+                        all_images,
+                        &layout,
+                        &mut feedback,
+                    );
+                }
+                CellKind::Folder(folder_idx) => {
+                    if ctrl
+                        && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
+                        && ui
+                            .input(|i| i.pointer.hover_pos())
+                            .is_some_and(|hp| cell_rect.contains(hp))
+                    {
+                        state.pending_remove.push(cell_pos);
+                    }
+                    let action = imcell::render_folder_cell(
+                        ui,
+                        &mut state.folder_cells[folder_idx],
+                        cell_rect,
+                    );
+                    if !matches!(action, FolderAction::None) {
+                        folder_actions.push(action);
+                    }
+                }
+            }
 
             x += layout.cell_w;
         }
@@ -476,6 +809,7 @@ pub fn image_grid(ui: &mut egui::Ui, state: &mut AppState, loading_count: usize)
     }
 
     draw_status_banner(ui, layout.grid, loading_count, &state.load_errors);
+    folder_actions
 }
 
 fn draw_status_banner(
