@@ -37,12 +37,10 @@ const GRID_PAD: f32 = 8.0;
 
 type LoadResult = Result<(core::image::DecodedImage, String, [u32; 256]), PathBuf>;
 type ScanResult = Option<(PathBuf, Vec<PathBuf>)>;
+/// 缩略图载荷：只需要缩小后的像素（EXIF/直方图跳过）。
+type ThumbResult = Result<core::image::DecodedImage, PathBuf>;
 
 enum LoadTarget {
-    Thumbnails {
-        folder_idx: usize,
-        start: usize,
-    },
     OpenEntry(usize, usize),
     OpenEntries {
         folder_idx: usize,
@@ -52,6 +50,11 @@ enum LoadTarget {
 }
 
 /// 文件夹 cell 的扫描/加载/缩略图状态机。
+///
+/// 三条独立管线（各自 mpsc 批次，互不阻塞）：
+/// - `load_rx`：打开/导航（全图解码）；
+/// - `thumb_rx`：缩略图（64px 解码）——缩略图加载中打开/导航仍可响应；
+/// - `scan_rx`：目录扫描。
 #[derive(Default)]
 pub struct FolderManager {
     load_rx: Option<mpsc::Receiver<(usize, LoadResult)>>,
@@ -59,6 +62,12 @@ pub struct FolderManager {
     loading_received: usize,
     loading_buf: Vec<Option<ImageInfo>>,
     load_target: Option<LoadTarget>,
+    thumb_rx: Option<mpsc::Receiver<(usize, ThumbResult)>>,
+    thumb_total: usize,
+    thumb_received: usize,
+    thumb_buf: Vec<Option<egui::TextureHandle>>,
+    /// 当前缩略图批次的目标 (文件夹下标, 起始条目)。
+    thumb_buf_meta: Option<(usize, usize)>,
     scan_rx: Option<mpsc::Receiver<(usize, ScanResult)>>,
     scan_total: usize,
     scan_received: usize,
@@ -89,10 +98,6 @@ pub(crate) fn sort_paths(paths: &mut [PathBuf]) {
 }
 
 impl FolderManager {
-    pub fn is_busy(&self) -> bool {
-        self.load_rx.is_some() || self.scan_rx.is_some()
-    }
-
     /// 排队扫描：当前无扫描批次时立即启动；扫描中则入队，
     /// 当前批次完成后自动接续——拖入新目录不受旧目录加载进度影响。
     pub fn queue_scan(&mut self, dirs: Vec<PathBuf>) {
@@ -183,8 +188,9 @@ impl FolderManager {
 
     /// 缩略图调度：取队首文件夹的一批（≤`THUMB_BATCH` 张），
     /// 未完成的回队尾（轮转）——多目录交替加载，单目录自转不受影响。
+    /// 走独立管线（`thumb_rx`），不阻塞打开/导航。
     pub fn drain_thumbnails(&mut self, state: &mut AppState, ctx: &egui::Context) {
-        if self.load_rx.is_some() || self.pending_thumbnails.is_empty() {
+        if self.thumb_rx.is_some() || self.pending_thumbnails.is_empty() {
             return;
         }
         let (fi, offset) = self.pending_thumbnails[0];
@@ -201,19 +207,88 @@ impl FolderManager {
         }
         let end = (offset + THUMB_BATCH).min(entries.len()).min(THUMB_LIMIT);
         let batch = entries[offset..end].to_vec();
-        self.spawn_loaders(
-            batch,
-            ctx,
-            LoadTarget::Thumbnails {
-                folder_idx: fi,
-                start: offset,
-            },
-        );
-        let done = end >= entries.len();
+        self.spawn_thumbnails(batch, ctx, fi, offset);
+        let done = end >= entries.len().min(THUMB_LIMIT);
         self.pending_thumbnails.pop_front();
         if !done {
             self.pending_thumbnails.push_back((fi, end));
         }
+    }
+
+    /// 启动一批缩略图解码（独立 channel）：线程内读文件 + 64px 解码，
+    /// 结果由 `poll_thumbnails` 收齐后按槽位写入。
+    fn spawn_thumbnails(
+        &mut self,
+        paths: Vec<PathBuf>,
+        ctx: &egui::Context,
+        folder_idx: usize,
+        start: usize,
+    ) {
+        self.thumb_total = paths.len();
+        self.thumb_received = 0;
+        self.thumb_buf = (0..paths.len()).map(|_| None).collect();
+        let (tx, rx) = mpsc::channel();
+
+        for (i, p) in paths.into_iter().enumerate() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let result: ThumbResult = (|| {
+                    let bytes = std::fs::read(&p).map_err(|e| {
+                        log::warn!("read failed {}: {}", p.display(), e);
+                        p.clone()
+                    })?;
+                    let mut img =
+                        core::image::decode_thumbnail_bytes(&bytes, 64).ok_or_else(|| {
+                            log::warn!("thumb decode failed {}", p.display());
+                            p.clone()
+                        })?;
+                    img.path = p.clone();
+                    Ok(img)
+                })();
+                tx.send((i, result)).ok();
+            });
+        }
+        drop(tx);
+
+        self.thumb_rx = Some(rx);
+        self.thumb_buf_meta = Some((folder_idx, start));
+        ctx.request_repaint();
+    }
+
+    /// 每帧把已完成的缩略图搬进 state（独立于打开/导航管线）。
+    pub fn poll_thumbnails(&mut self, state: &mut AppState, ctx: &egui::Context) {
+        let Some(rx) = &self.thumb_rx else {
+            return;
+        };
+        while let Ok((i, result)) = rx.try_recv() {
+            if let Ok(img) = result {
+                let name = img
+                    .path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("thumb");
+                let tex = crate::ui::imcell::upload_texture(ctx, &img.rgba, img.size, name);
+                self.thumb_buf[i] = Some(tex);
+            }
+            self.thumb_received += 1;
+        }
+        if self.thumb_received < self.thumb_total {
+            return;
+        }
+        let buf = std::mem::take(&mut self.thumb_buf);
+        if let Some((folder_idx, start)) = self.thumb_buf_meta.take()
+            && let Some(folder) = state.folder_cells.get_mut(folder_idx)
+        {
+            for (i, tex) in buf.into_iter().enumerate() {
+                if start + i < folder.thumbnails.len() {
+                    folder.thumbnails[start + i] = tex;
+                }
+            }
+        }
+        self.thumb_rx = None;
+        self.thumb_total = 0;
+        self.thumb_received = 0;
+        ctx.request_repaint();
     }
 
     /// 打开文件夹条目（每个文件夹同时最多 1 张，重复打开自动替换）。
@@ -287,7 +362,6 @@ impl FolderManager {
         self.loading_total = paths.len();
         self.loading_received = 0;
         self.loading_buf = (0..paths.len()).map(|_| None).collect();
-        let thumb = matches!(target, LoadTarget::Thumbnails { .. });
         self.load_target = Some(target);
         let (tx, rx) = mpsc::channel();
 
@@ -299,28 +373,13 @@ impl FolderManager {
                         log::warn!("read failed {}: {}", p.display(), e);
                         p.clone()
                     })?;
-                    let mut img = if thumb {
-                        core::image::decode_thumbnail_bytes(&bytes, 64).ok_or_else(|| {
-                            log::warn!("thumb decode failed {}", p.display());
-                            p.clone()
-                        })?
-                    } else {
-                        core::image::decode_image_bytes(&bytes).ok_or_else(|| {
-                            log::warn!("decode failed {}", p.display());
-                            p.clone()
-                        })?
-                    };
+                    let mut img = core::image::decode_image_bytes(&bytes).ok_or_else(|| {
+                        log::warn!("decode failed {}", p.display());
+                        p.clone()
+                    })?;
                     img.path = p.clone();
-                    let exif = if thumb {
-                        String::new()
-                    } else {
-                        core::image::extract_exif(&bytes)
-                    };
-                    let histogram = if thumb {
-                        [0u32; 256]
-                    } else {
-                        core::image::compute_y_histogram(&img.rgba)
-                    };
+                    let exif = core::image::extract_exif(&bytes);
+                    let histogram = core::image::compute_y_histogram(&img.rgba);
                     Ok((img, exif, histogram))
                 })();
                 tx.send((i, result)).ok();
@@ -369,15 +428,6 @@ impl FolderManager {
         }
         let buf = std::mem::take(&mut self.loading_buf);
         match self.load_target.take() {
-            Some(LoadTarget::Thumbnails { folder_idx, start }) => {
-                if let Some(folder) = state.folder_cells.get_mut(folder_idx) {
-                    for (i, slot) in buf.into_iter().enumerate() {
-                        if start + i < folder.thumbnails.len() {
-                            folder.thumbnails[start + i] = slot.map(|info| info.texture);
-                        }
-                    }
-                }
-            }
             Some(LoadTarget::OpenEntry(folder_idx, entry_idx)) => {
                 if let Some(Some(info)) = buf.into_iter().next()
                     && folder_idx < state.folder_cells.len()
@@ -855,9 +905,8 @@ mod tests {
         m.pending_thumbnails[0].1 = THUMB_LIMIT;
         // 直接验证 drain 的完成判定（不 spawn：entries 上限截断后 offset 已到顶）
         let ctx = egui::Context::default();
-        let before = m.load_rx.is_some();
         m.drain_thumbnails(&mut s, &ctx);
-        assert!(!m.load_rx.is_some() || before, "超限后不再启动新批次");
+        assert!(m.thumb_rx.is_none(), "超限后不再启动缩略图批次");
         assert!(m.pending_thumbnails.is_empty(), "队列清空");
     }
 }

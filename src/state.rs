@@ -257,7 +257,7 @@ impl AppState {
     /// 同一文件夹多图时索引语义歧义，不响应 Space/B。
     pub fn folder_nav_allowed(&self) -> bool {
         let counts = self.folder_open_counts();
-        !counts.is_empty() && counts.iter().all(|&c| c <= 1) && counts.iter().any(|&c| c == 1)
+        !counts.is_empty() && counts.iter().all(|&c| c <= 1) && counts.contains(&1)
     }
 
     /// 对比对：恰好两个文件夹、各打开 1 张。此时**禁删图**（防误删对比图），

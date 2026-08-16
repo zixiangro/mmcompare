@@ -14,8 +14,9 @@
   ├─ 目录: ui/folder.rs（FolderManager 管线）
   │     queue_scan() 排队（不受图片加载进度影响）→ scan_folders() 子线程 read_dir
   │     → poll_scan() 登记入格（扫描批次完成后自动接续队列）
-  │     → 缩略图排队：新目录插队（最近优先）、分批轮转（≤8 张/批）
-  │     → 打开/导航走同一管线的 OpenEntry/OpenEntries/NavigateMany
+  │     → 缩略图**独立管线**（thumb_rx）：新目录插队（最近优先）、分批轮转
+  │       （≤8 张/批，每文件夹上限 THUMB_LIMIT），与打开/导航互不阻塞
+  │     → 打开/导航走 load_rx 管线的 OpenEntry/OpenEntries/NavigateMany
   │
   ├─ imlayout.rs 管线（standalone 图片）
   │     spawn_loaders() → 子线程：读文件 → decode → EXIF → 直方图 → mpsc

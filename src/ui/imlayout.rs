@@ -59,8 +59,9 @@ impl Default for MmCompare {
 }
 
 impl MmCompare {
+    /// 图片文件加载管线是否忙（文件夹的扫描/缩略图是独立管线，不影响文件加载）。
     fn is_busy(&self) -> bool {
-        self.load_rx.is_some() || self.folder.is_busy()
+        self.load_rx.is_some()
     }
 
     /// 把输入路径分类为图片文件与文件夹（去重、排序、标记、截断名额），
@@ -345,6 +346,7 @@ impl eframe::App for MmCompare {
         self.poll_loading(ui.ctx());
         self.folder.poll_scan(&mut self.state);
         self.folder.poll_loading(&mut self.state, ui.ctx());
+        self.folder.poll_thumbnails(&mut self.state, ui.ctx());
         self.drain_pending_drops(ui.ctx());
         self.folder.drain_thumbnails(&mut self.state, ui.ctx());
 
