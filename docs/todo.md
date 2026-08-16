@@ -31,7 +31,7 @@
 ### M1 解码选型 spike（先决任务）
 
 - [x] 解码候选对比：结论进 ADR-0007 备选方案节（symphonia 无 H.264/265；openh264+libde265 自研成本高；子进程违背单二进制）
-- [x] dev 引入 ffmpeg-next 9.0（format + software-scaling，裁掉 device/filter/swresample）；**三平台 CI 配置完成，待 CI 验证**
+- [x] dev 引入 ffmpeg-next 9.0（format + software-scaling，裁掉 device/filter/swresample）；三平台 CI 配置完成，**macOS 暂缓**（brew 在 runner 失败，bottle 直下方案已备好）
 - [x] `core/video.rs` 雏形：read_info（时长/帧率/尺寸）+ first_frame（swscale 转 RGB24，可降采样）；只初始化视频流（D5）；4 个单测
 - [x] 降采样策略：first_frame 最长边限制 + BILINEAR（swscale）
 - [x] ADR-0007：已接受（单程序模式切换 + ffmpeg 动态链接 + 交互隔离）
