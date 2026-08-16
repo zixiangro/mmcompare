@@ -28,6 +28,8 @@ pub enum FolderAction {
     Remove(usize),
     OpenSelected,
     ToggleView,
+    /// 无修饰单击：所有文件夹 cell 联动选中同索引（双栏对比的基准操作）。
+    SelectSynced(usize),
 }
 
 pub struct ImageInfo {

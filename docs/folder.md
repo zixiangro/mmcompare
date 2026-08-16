@@ -51,27 +51,35 @@ imlayout 只做编排调用；图片 cell 渲染在 `ui/imcell.rs`。
 
 | 操作 | 行为 |
 |---|---|
-| 单击条目 | 选择（Ctrl 多选 / Shift 范围选） |
-| 双击条目 | 打开为图片 cell（多文件夹时每文件夹限 1 张，重复打开替换；文件夹 cell 从网格隐藏） |
+| 单击条目 | **联动选中所有文件夹的同索引**（双栏对比基准；由 `SelectSynced` 统一处理） |
+| `Ctrl` + 单击 | 重新选当前栏的另一张（本栏替换，不联动） |
+| `Shift` + 单击 | 单栏范围选择 |
+| 双击条目 | 打开为图片 cell（单文件夹可开多张；多文件夹每文件夹限 1 张，重复打开替换；文件夹 cell 从网格隐藏） |
 | 右键菜单 | Open image / Open file location / Remove from list / Open selected / Toggle view |
 | 滚轮 | 滚动条目列表（或缩略图网格） |
 | `Space` / `B` | 导航：每个文件夹打开 ≤1 张时响应，各文件夹图片同步上一张 / 下一张 |
+| `Space`（有选中条目） | 打开**所有**文件夹的选中条目（`open_selected_all` 拍平为一个批次，按网格名额截断） |
 | `Esc` | 关闭文件夹图片，恢复文件夹 cell 显示 |
-| `Space`（有选中条目时） | 打开全部选中条目（按网格名额截断） |
 | `Ctrl` + 右键 | 删除 cell：图片或文件夹；**对比对（2 文件夹各 1 张）时禁删图片** |
 
 ## 打开 / 导航
 
-- **打开**：`open_entry` → 异步加载全图 → `open_folder_entry`：
+- **打开**：`open_entry`（双击）或 `open_selected_all`（空格，拍平所有文件夹的
+  选中条目为一个批次）→ 异步加载全图 → `open_folder_entry`：
   多文件夹时每文件夹限 1 张（重复打开替换），单文件夹可开多张；
   文件夹 cell 隐藏（`open_entry` 记录当前条目）。
+- **联动选择**：无修饰单击返回 `FolderAction::SelectSynced`，由 imlayout
+  统一设置所有文件夹的 `selected`（渲染层不跨 folder 操作）；`Ctrl`+单击
+  只替换当前栏。
+- **widget id 盐**：行/格交互 id 带 `id_salt`（文件夹下标）——
+  多栏同索引条目的 persistent id 不再冲突（egui 同 id 会互相覆盖交互）。
 - **同步导航**（Space/B）：`folder_nav_targets` 计算**所有**打开的文件夹图片
   各自的下一条/上一条（每文件夹 ≤1 张时才响应），`NavigateMany` 一次批次
   加载，完成后逐张替换并作废选区。
 - **关闭**（Esc / Ctrl+右键删除）：`remove_cell` 的 Image 分支在该文件夹
   最后一张被删时才恢复文件夹 cell（还有打开图时保持隐藏）。
 - 打开/导航与缩略图共用同一加载管线（`LoadTarget::OpenEntry` /
-  `OpenEntries` / `NavigateMany`），加载中收到的请求忽略，不互相覆盖。
+  `OpenEntries` / `OpenMany` / `NavigateMany`），加载中收到的请求忽略，不互相覆盖。
 
 ## 已知限制
 

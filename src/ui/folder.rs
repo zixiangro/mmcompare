@@ -53,6 +53,9 @@ enum LoadTarget {
         entry_idxs: Vec<usize>,
         dir: PathBuf,
     },
+    /// 空格打开：多个文件夹的选中条目拍平为一个批次
+    /// (文件夹下标, 条目下标, 目标 dir)。
+    OpenMany(Vec<(usize, usize, PathBuf)>),
     /// (图片下标, 文件夹下标, 新条目下标, 目标文件夹 dir)
     NavigateMany(Vec<(usize, usize, usize, PathBuf)>),
 }
@@ -381,6 +384,42 @@ impl FolderManager {
         );
     }
 
+    /// 空格打开：收集**所有**文件夹的选中条目为一个批次（双栏联动选中后
+    /// 一次打开两张），按网格名额截断（可见文件夹各腾 1 格）。
+    pub fn open_selected_all(&mut self, state: &mut AppState, ctx: &egui::Context) {
+        if self.load_rx.is_some() {
+            return;
+        }
+        let mut flat: Vec<(usize, usize, PathBuf)> = Vec::new();
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for (fi, f) in state.folder_cells.iter().enumerate() {
+            for &ei in &f.selected {
+                if ei < f.entries.len() {
+                    flat.push((fi, ei, f.dir_path.clone()));
+                    paths.push(f.entries[ei].clone());
+                }
+            }
+        }
+        if flat.is_empty() {
+            return;
+        }
+        // 每个可见文件夹打开后隐藏腾 1 格，净增 = 打开数 - 可见文件夹数
+        let visible_folders = state
+            .cell_order
+            .iter()
+            .filter(|c| matches!(c, CellKind::Folder(_)))
+            .count();
+        let room = MAX_IMAGES
+            .saturating_sub(state.cell_order.len())
+            .saturating_add(visible_folders);
+        flat.truncate(room);
+        paths.truncate(room);
+        if flat.is_empty() {
+            return;
+        }
+        self.spawn_loaders(paths, ctx, LoadTarget::OpenMany(flat));
+    }
+
     /// 同步导航：所有打开的文件夹图片各自前进/后退一张（双文件夹对比索引）。
     /// 每个目标带 dir 做漂移校验。
     pub fn navigate(
@@ -505,6 +544,17 @@ impl FolderManager {
                     }
                 }
             }
+            Some(LoadTarget::OpenMany(entries)) => {
+                for (i, slot) in buf.into_iter().enumerate() {
+                    if let (Some(info), Some(&(folder_idx, entry_idx, ref dir))) =
+                        (slot, entries.get(i))
+                        && dir_matches(state, folder_idx, dir)
+                    // 漂移校验
+                    {
+                        state.open_folder_entry(folder_idx, entry_idx, info);
+                    }
+                }
+            }
             Some(LoadTarget::NavigateMany(targets)) => {
                 for (i, slot) in buf.into_iter().enumerate() {
                     if let (Some(info), Some(&(img_idx, folder_idx, entry_idx, ref dir))) =
@@ -605,6 +655,13 @@ impl FolderManager {
                     }
                 }
             }
+            // 无修饰单击：所有文件夹 cell 联动选中同索引（双栏对比的基准操作）
+            FolderAction::SelectSynced(idx) => {
+                for f in &mut state.folder_cells {
+                    f.selected.clear();
+                    f.selected.insert(idx);
+                }
+            }
             FolderAction::None => {}
         }
     }
@@ -614,6 +671,9 @@ pub fn render_folder_cell(
     ui: &mut egui::Ui,
     folder: &mut FolderCell,
     cell_rect: egui::Rect,
+    // 文件夹下标：行/格 widget id 的盐，避免多栏同索引条目 id 冲突
+    // （egui 的 persistent id 同帧重复会互相覆盖交互状态）。
+    id_salt: usize,
 ) -> FolderAction {
     ui.painter()
         .rect_filled(cell_rect, 0.0, egui::Color32::from_gray(248));
@@ -636,12 +696,31 @@ pub fn render_folder_cell(
     let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
 
     if matches!(folder.view_mode, FolderView::List) {
-        render_list(ui, folder, cell_rect, hover_pos, ctrl, shift, scroll_delta)
+        render_list(
+            ui,
+            folder,
+            cell_rect,
+            hover_pos,
+            ctrl,
+            shift,
+            scroll_delta,
+            id_salt,
+        )
     } else {
-        render_grid(ui, folder, cell_rect, hover_pos, ctrl, shift, scroll_delta)
+        render_grid(
+            ui,
+            folder,
+            cell_rect,
+            hover_pos,
+            ctrl,
+            shift,
+            scroll_delta,
+            id_salt,
+        )
     }
 }
 
+#[allow(clippy::too_many_arguments)] // 纯绘制+交互函数，扁平参数
 fn render_list(
     ui: &mut egui::Ui,
     folder: &mut FolderCell,
@@ -650,6 +729,7 @@ fn render_list(
     ctrl: bool,
     shift: bool,
     scroll_delta: f32,
+    id_salt: usize,
 ) -> FolderAction {
     let total_h = folder.entries.len() as f32 * ROW_H;
     let max_scroll = (total_h - cell_rect.height()).max(0.0);
@@ -709,16 +789,13 @@ fn render_list(
             tc,
         );
 
-        let row_id = ui.make_persistent_id(format!("frow_{}", i));
+        let row_id = ui.make_persistent_id(format!("frow_{}_{}", id_salt, i));
         let row_resp = ui.interact(row_rect, row_id, egui::Sense::click());
         if row_resp.clicked() {
-            let sel = folder.selected.contains(&i);
             if ctrl {
-                if sel {
-                    folder.selected.remove(&i);
-                } else {
-                    folder.selected.insert(i);
-                }
+                // Ctrl+单击：重新选当前栏的另一张（替换本栏选择，不联动）
+                folder.selected.clear();
+                folder.selected.insert(i);
             } else if shift {
                 let last = folder.selected.iter().max().copied().unwrap_or(i);
                 let (lo, hi) = if i < last { (i, last) } else { (last, i) };
@@ -726,8 +803,8 @@ fn render_list(
                     folder.selected.insert(j);
                 }
             } else {
-                folder.selected.clear();
-                folder.selected.insert(i);
+                // 无修饰单击：联动选中所有栏的同索引（由 imlayout 统一处理）
+                result = FolderAction::SelectSynced(i);
             }
         }
         if row_resp.double_clicked() {
@@ -752,6 +829,7 @@ fn render_list(
     result
 }
 
+#[allow(clippy::too_many_arguments)] // 纯绘制+交互函数，扁平参数
 fn render_grid(
     ui: &mut egui::Ui,
     folder: &mut FolderCell,
@@ -760,6 +838,7 @@ fn render_grid(
     ctrl: bool,
     shift: bool,
     scroll_delta: f32,
+    id_salt: usize,
 ) -> FolderAction {
     let avail_w = cell_rect.width() - GRID_PAD;
     let cols = (avail_w / (GRID_CELL + GRID_PAD)).max(1.0) as usize;
@@ -827,16 +906,13 @@ fn render_grid(
             tc,
         );
 
-        let row_id = ui.make_persistent_id(format!("fgrid_{}", i));
+        let row_id = ui.make_persistent_id(format!("fgrid_{}_{}", id_salt, i));
         let resp = ui.interact(gc, row_id, egui::Sense::click());
         if resp.clicked() {
-            let sel = folder.selected.contains(&i);
             if ctrl {
-                if sel {
-                    folder.selected.remove(&i);
-                } else {
-                    folder.selected.insert(i);
-                }
+                // Ctrl+单击：重新选当前栏的另一张（替换本栏选择，不联动）
+                folder.selected.clear();
+                folder.selected.insert(i);
             } else if shift {
                 let last = folder.selected.iter().max().copied().unwrap_or(i);
                 let (lo, hi) = if i < last { (i, last) } else { (last, i) };
@@ -844,8 +920,8 @@ fn render_grid(
                     folder.selected.insert(j);
                 }
             } else {
-                folder.selected.clear();
-                folder.selected.insert(i);
+                // 无修饰单击：联动选中所有栏的同索引（由 imlayout 统一处理）
+                result = FolderAction::SelectSynced(i);
             }
         }
         if resp.double_clicked() {
@@ -996,5 +1072,38 @@ mod tests {
         m.drain_thumbnails(&mut s, &ctx);
         assert!(m.pending_thumbnails.is_empty(), "漂移的缩略图请求被丢弃");
         assert!(m.thumb_rx.is_none(), "未启动新批次");
+    }
+    #[test]
+    fn select_synced_updates_all_folders() {
+        let ctx = egui::Context::default();
+        let mut m = FolderManager::default();
+        let mut s = AppState::new();
+        m.register_folder_cell(&mut s, PathBuf::from("A"), entries(5));
+        m.register_folder_cell(&mut s, PathBuf::from("B"), entries(5));
+        s.folder_cells[0].selected.insert(0);
+        m.handle_action(&mut s, FolderAction::SelectSynced(2), &ctx);
+        assert_eq!(s.folder_cells[0].selected, HashSet::from([2]), "左栏联动");
+        assert_eq!(s.folder_cells[1].selected, HashSet::from([2]), "右栏联动");
+    }
+
+    #[test]
+    fn open_selected_all_flattens_all_folders() {
+        let ctx = egui::Context::default();
+        let mut m = FolderManager::default();
+        let mut s = AppState::new();
+        m.register_folder_cell(&mut s, PathBuf::from("A"), entries(5));
+        m.register_folder_cell(&mut s, PathBuf::from("B"), entries(5));
+        s.folder_cells[0].selected.insert(2);
+        s.folder_cells[1].selected.insert(3);
+        m.open_selected_all(&mut s, &ctx);
+        assert!(m.load_rx.is_some(), "批次已启动");
+        match m.load_target.take() {
+            Some(LoadTarget::OpenMany(v)) => {
+                assert_eq!(v.len(), 2, "两栏选中条目拍平为一个批次");
+                assert_eq!(v[0], (0, 2, PathBuf::from("A")));
+                assert_eq!(v[1], (1, 3, PathBuf::from("B")));
+            }
+            _ => panic!("expected OpenMany"),
+        }
     }
 }

@@ -325,12 +325,8 @@ impl eframe::App for MmCompare {
                 if !targets.is_empty() && self.state.folder_nav_allowed() {
                     self.folder.navigate(&mut self.state, ui.ctx(), targets);
                 } else if space {
-                    for fi in 0..self.state.folder_cells.len() {
-                        if !self.state.folder_cells[fi].selected.is_empty() {
-                            self.folder.open_selected(&mut self.state, ui.ctx(), fi);
-                            break;
-                        }
-                    }
+                    // 空格：打开所有文件夹的选中条目（双栏联动选中后一次开两张）
+                    self.folder.open_selected_all(&mut self.state, ui.ctx());
                 }
             }
         }
@@ -529,6 +525,7 @@ pub fn image_grid(
                         ui,
                         &mut state.folder_cells[folder_idx],
                         cell_rect,
+                        folder_idx,
                     );
                     if !matches!(action, FolderAction::None) {
                         folder_actions.push(action);
