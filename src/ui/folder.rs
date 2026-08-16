@@ -25,6 +25,9 @@ use crate::state::{
 
 /// 缩略图单批并发上限：同时解码的原图数 × (文件字节 + 解码缓冲) 即峰值内存。
 const THUMB_BATCH: usize = 8;
+/// 单个文件夹的缩略图数量上限：超过的条目不生成缩略图（渲染时显示占位），
+/// 避免海量目录长期占用加载管线（缩略图与打开/导航共用 `load_rx`）。
+const THUMB_LIMIT: usize = 200;
 
 const ROW_H: f32 = 52.0;
 const THUMB_SIZE: f32 = 44.0;
@@ -172,7 +175,8 @@ impl FolderManager {
         state.cell_order.push(CellKind::Folder(idx));
         state.pan_offset.push([0.0, 0.0]);
         let n = state.folder_cells[idx].entries.len();
-        state.folder_cells[idx].thumbnails = (0..n).map(|_| None).collect();
+        // 只预填前 THUMB_LIMIT 个槽位：超限条目渲染时 get(i) 越界返回 None（占位）
+        state.folder_cells[idx].thumbnails = (0..n.min(THUMB_LIMIT)).map(|_| None).collect();
         // 新目录插队到队首：后拖入的优先加载，方便及时对比
         self.pending_thumbnails.push_front((idx, 0));
     }
@@ -191,11 +195,11 @@ impl FolderManager {
                 return;
             }
         };
-        if offset >= entries.len() {
+        if offset >= entries.len().min(THUMB_LIMIT) {
             self.pending_thumbnails.pop_front();
             return;
         }
-        let end = (offset + THUMB_BATCH).min(entries.len());
+        let end = (offset + THUMB_BATCH).min(entries.len()).min(THUMB_LIMIT);
         let batch = entries[offset..end].to_vec();
         self.spawn_loaders(
             batch,
@@ -835,5 +839,25 @@ mod tests {
         m.pending_thumbnails.push_back((1, 8)); // B 未完成回队尾
         assert_eq!(m.pending_thumbnails[0].0, 0, "A 回到队首，下一批加载 A");
         assert_eq!(m.pending_thumbnails[1], (1, 8), "B 保留进度在队尾");
+    }
+    #[test]
+    fn thumb_limit_caps_prealloc_and_queue() {
+        let mut m = FolderManager::default();
+        let mut s = AppState::new();
+        m.register_folder_cell(&mut s, PathBuf::from("big"), entries(300));
+        assert_eq!(
+            s.folder_cells[0].thumbnails.len(),
+            THUMB_LIMIT,
+            "只预填上限个槽位"
+        );
+        assert_eq!(m.pending_thumbnails[0], (0, 0));
+        // 模拟推进到上限边界：offset >= THUMB_LIMIT 视为完成
+        m.pending_thumbnails[0].1 = THUMB_LIMIT;
+        // 直接验证 drain 的完成判定（不 spawn：entries 上限截断后 offset 已到顶）
+        let ctx = egui::Context::default();
+        let before = m.load_rx.is_some();
+        m.drain_thumbnails(&mut s, &ctx);
+        assert!(!m.load_rx.is_some() || before, "超限后不再启动新批次");
+        assert!(m.pending_thumbnails.is_empty(), "队列清空");
     }
 }
