@@ -360,7 +360,7 @@ impl MmCompare {
             match result {
                 Ok((info, rgb)) => {
                     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("video");
-                    let texture = imcell::upload_texture(
+                    let texture = imcell::upload_rgb_texture(
                         ctx,
                         &rgb,
                         [info.width as usize, info.height as usize],
@@ -396,8 +396,9 @@ impl MmCompare {
         }
     }
 
-    /// 启动一个视频解码会话：`continuous=false` 解码单帧（暂停时 seek/步进），
-    /// `continuous=true` 按帧率持续发帧（播放）。帧通道 rx 被主线程丢弃时线程退出。
+    /// 启动一个视频解码会话：`continuous=false` 解码单帧（暂停时 seek/步进，
+    /// 精确到目标 pts），`continuous=true` 按帧率持续发帧（播放）。
+    /// 帧通道 rx 被主线程丢弃时线程退出。
     fn spawn_video_worker(&mut self, cell_idx: usize, from_secs: f64, continuous: bool) {
         let path = self.state.video_cells[cell_idx].path.clone();
         self.video_sessions.retain(|s| s.path != path);
@@ -412,26 +413,35 @@ impl MmCompare {
                     return;
                 }
             };
-            let frame_dur = dec.frame_duration();
-            let play_result = dec.play(from_secs, |frame| {
-                let ok = tx.send(VideoMsg::Frame {
+            let send_frame = |tx: &mpsc::Sender<VideoMsg>, frame: core::video::DecodedFrame| {
+                tx.send(VideoMsg::Frame {
                     path: wpath.clone(),
                     pts: frame.pts_secs,
                     rgb: frame.rgb,
                     width: frame.width,
                     height: frame.height,
-                });
-                if ok.is_err() {
-                    return false;
-                }
-                if continuous {
+                })
+            };
+            let result = if continuous {
+                let frame_dur = dec.frame_duration();
+                dec.play(from_secs, |frame| {
+                    if send_frame(&tx, frame).is_err() {
+                        return false;
+                    }
                     std::thread::sleep(std::time::Duration::from_secs_f64(frame_dur));
                     true
-                } else {
-                    false
+                })
+            } else {
+                match dec.seek_frame(from_secs) {
+                    Ok(Some(frame)) => {
+                        let _ = send_frame(&tx, frame);
+                        Ok(())
+                    }
+                    Ok(None) => Ok(()),
+                    Err(e) => Err(e),
                 }
-            });
-            if let Err(e) = play_result {
+            };
+            if let Err(e) = result {
                 log::warn!("video play failed {}: {}", wpath.display(), e);
                 let _ = tx.send(VideoMsg::Error { path: wpath });
             } else {
@@ -478,7 +488,7 @@ impl MmCompare {
     fn poll_video(&mut self, ctx: &egui::Context) {
         let mut keep: Vec<VideoSession> = Vec::new();
         for session in std::mem::take(&mut self.video_sessions) {
-            let mut alive = false;
+            let mut dead = false;
             loop {
                 match session.rx.try_recv() {
                     Ok(VideoMsg::Frame {
@@ -488,13 +498,12 @@ impl MmCompare {
                         width,
                         height,
                     }) => {
-                        alive = true;
                         if let Some(idx) =
                             self.state.video_cells.iter().position(|c| c.path == path)
                         {
                             let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("video");
                             let cell = &mut self.state.video_cells[idx];
-                            cell.texture = Some(imcell::upload_texture(
+                            cell.texture = Some(imcell::upload_rgb_texture(
                                 ctx,
                                 &rgb,
                                 [width as usize, height as usize],
@@ -530,12 +539,13 @@ impl MmCompare {
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        alive = false;
+                        dead = true;
                         break;
                     }
                 }
             }
-            if alive {
+            // 只有 worker 已退出（通道断开）才移除会话；Empty 时 worker 仍在跑
+            if !dead {
                 keep.push(session);
             }
         }
@@ -1484,6 +1494,60 @@ mod tests {
         assert_eq!(dirs, vec![tmp.join("sub")]);
         let _ = fs::remove_dir_all(&tmp);
     }
+    #[test]
+    fn video_playback_roundtrip_no_crash() {
+        // 回归：拖视频崩溃（0xc0000409 栈溢出）。模拟播放会话：播放 → poll → 暂停 → seek。
+        video_playback_roundtrip_impl("tests/fixtures/sample.mp4");
+    }
+
+    #[test]
+    fn video_playback_1080p_no_crash() {
+        // 回归：真实分辨率（1080p）播放，覆盖解码线程栈溢出场景
+        video_playback_roundtrip_impl("tests/fixtures/sample1080.mp4");
+    }
+
+    fn video_playback_roundtrip_impl(sample: &str) {
+        let ctx = egui::Context::default();
+        let mut app = MmCompare::default();
+        let path = PathBuf::from(sample);
+        app.state.append_videos(vec![VideoCell {
+            path: path.clone(),
+            info: crate::core::video::VideoInfo {
+                width: 320,
+                height: 240,
+                duration_secs: 3.0,
+                frame_rate: 30.0,
+            },
+            texture: None,
+            playing: false,
+            position_secs: 0.0,
+            frame_pts: 0.0,
+            failed: false,
+        }]);
+        app.video_toggle_play(0);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1200);
+        while std::time::Instant::now() < deadline {
+            app.poll_video(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        app.video_toggle_play(0); // 暂停
+        app.video_seek(0, 1.0); // 单帧 seek
+        for _ in 0..20 {
+            app.poll_video(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        let cell = &app.state.video_cells[0];
+        assert!(
+            app.state.load_errors.is_empty(),
+            "no load errors: {:?}",
+            app.state.load_errors
+        );
+        assert!(!cell.failed, "cell should not be failed");
+        assert!(cell.texture.is_some(), "播放应产生纹理");
+        assert!(!cell.playing, "暂停后不再播放");
+        assert!(cell.frame_pts > 0.0, "播放推进了 pts");
+    }
+
     #[test]
     fn video_batch_enters_video_mode() {
         // 已有图片 + 拖入视频 → 图片被清空，视频被接受（M2 简化切换）

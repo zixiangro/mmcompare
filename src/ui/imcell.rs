@@ -20,6 +20,18 @@ pub fn upload_texture(
     ctx.load_texture(name, color_image, egui::TextureOptions::default())
 }
 
+/// RGB24（3 通道）纹理上传：视频帧（swscale 输出）专用，
+/// 与 RGBA 的 `upload_texture` 严格区分。
+pub fn upload_rgb_texture(
+    ctx: &egui::Context,
+    rgb: &[u8],
+    size: [usize; 2],
+    name: &str,
+) -> egui::TextureHandle {
+    let color_image = egui::ColorImage::from_rgb(size, rgb);
+    ctx.load_texture(name, color_image, egui::TextureOptions::default())
+}
+
 pub fn rotate_image(info: &ImageInfo, ctx: &egui::Context) -> ImageInfo {
     let (rgba, size) = core::image::rotate_rgba_90_cw(&info.rgba, info.size[0], info.size[1]);
     let histogram = core::image::compute_y_histogram(&rgba);
