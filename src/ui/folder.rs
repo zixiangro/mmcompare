@@ -41,12 +41,20 @@ type ScanResult = Option<(PathBuf, Vec<PathBuf>)>;
 type ThumbResult = Result<core::image::DecodedImage, PathBuf>;
 
 enum LoadTarget {
-    OpenEntry(usize, usize),
+    /// 打开单个条目：目标文件夹带 `dir` 做漂移校验（加载期间文件夹被删/索引
+    /// 移动时，结果丢弃而非写到错误的文件夹）。
+    OpenEntry {
+        folder_idx: usize,
+        entry_idx: usize,
+        dir: PathBuf,
+    },
     OpenEntries {
         folder_idx: usize,
         entry_idxs: Vec<usize>,
+        dir: PathBuf,
     },
-    NavigateMany(Vec<(usize, usize, usize)>),
+    /// (图片下标, 文件夹下标, 新条目下标, 目标文件夹 dir)
+    NavigateMany(Vec<(usize, usize, usize, PathBuf)>),
 }
 
 /// 文件夹 cell 的扫描/加载/缩略图状态机。
@@ -66,18 +74,20 @@ pub struct FolderManager {
     thumb_total: usize,
     thumb_received: usize,
     thumb_buf: Vec<Option<egui::TextureHandle>>,
-    /// 当前缩略图批次的目标 (文件夹下标, 起始条目)。
-    thumb_buf_meta: Option<(usize, usize)>,
+    /// 当前缩略图批次的目标 (文件夹下标, 起始条目, 目标 dir)——
+    /// dir 用于漂移校验（加载期间文件夹被删时丢弃结果）。
+    thumb_buf_meta: Option<(usize, usize, PathBuf)>,
     scan_rx: Option<mpsc::Receiver<(usize, ScanResult)>>,
     scan_total: usize,
     scan_received: usize,
     scan_buf: Vec<ScanResult>,
     /// 排队等待扫描的目录批次（当前扫描批次完成后按序启动）。
     pending_scan: VecDeque<Vec<PathBuf>>,
-    /// 待生成缩略图的 (文件夹下标, 下一个条目偏移)。
+    /// 待生成缩略图的 (文件夹下标, 下一个条目偏移, 目标 dir)——
+    /// dir 用于漂移校验（文件夹索引移动时丢弃过期的请求）。
     /// 调度：新目录 `push_front` 插队（后拖入的优先，方便及时对比），
     /// `drain_thumbnails` 每批处理后未完成的回队尾（轮转，多目录均衡）。
-    pending_thumbnails: VecDeque<(usize, usize)>,
+    pending_thumbnails: VecDeque<(usize, usize, PathBuf)>,
 }
 
 pub(crate) fn is_image_ext(p: &Path) -> bool {
@@ -189,7 +199,8 @@ impl FolderManager {
         // 只预填前 THUMB_LIMIT 个槽位：超限条目渲染时 get(i) 越界返回 None（占位）
         state.folder_cells[idx].thumbnails = (0..n.min(THUMB_LIMIT)).map(|_| None).collect();
         // 新目录插队到队首：后拖入的优先加载，方便及时对比
-        self.pending_thumbnails.push_front((idx, 0));
+        let dir = state.folder_cells[idx].dir_path.clone();
+        self.pending_thumbnails.push_front((idx, 0, dir));
     }
 
     /// 缩略图调度：取队首文件夹的一批（≤`THUMB_BATCH` 张），
@@ -199,9 +210,16 @@ impl FolderManager {
         if self.thumb_rx.is_some() || self.pending_thumbnails.is_empty() {
             return;
         }
-        let (fi, offset) = self.pending_thumbnails[0];
+        let (fi, offset, dir) = self.pending_thumbnails[0].clone();
         let entries = match state.folder_cells.get(fi) {
-            Some(f) => f.entries.clone(),
+            Some(f) => {
+                if f.dir_path != dir {
+                    // 文件夹索引已移动（加载期间删过其他文件夹），丢弃过期请求
+                    self.pending_thumbnails.pop_front();
+                    return;
+                }
+                f.entries.clone()
+            }
             None => {
                 self.pending_thumbnails.pop_front();
                 return;
@@ -213,11 +231,11 @@ impl FolderManager {
         }
         let end = (offset + THUMB_BATCH).min(entries.len()).min(THUMB_LIMIT);
         let batch = entries[offset..end].to_vec();
-        self.spawn_thumbnails(batch, ctx, fi, offset);
+        self.spawn_thumbnails(batch, ctx, fi, offset, dir.clone());
         let done = end >= entries.len().min(THUMB_LIMIT);
         self.pending_thumbnails.pop_front();
         if !done {
-            self.pending_thumbnails.push_back((fi, end));
+            self.pending_thumbnails.push_back((fi, end, dir));
         }
     }
 
@@ -229,6 +247,7 @@ impl FolderManager {
         ctx: &egui::Context,
         folder_idx: usize,
         start: usize,
+        dir: PathBuf,
     ) {
         self.thumb_total = paths.len();
         self.thumb_received = 0;
@@ -257,7 +276,7 @@ impl FolderManager {
         drop(tx);
 
         self.thumb_rx = Some(rx);
-        self.thumb_buf_meta = Some((folder_idx, start));
+        self.thumb_buf_meta = Some((folder_idx, start, dir));
         ctx.request_repaint();
     }
 
@@ -282,8 +301,10 @@ impl FolderManager {
             return;
         }
         let buf = std::mem::take(&mut self.thumb_buf);
-        if let Some((folder_idx, start)) = self.thumb_buf_meta.take()
+        if let Some((folder_idx, start, dir)) = self.thumb_buf_meta.take()
             && let Some(folder) = state.folder_cells.get_mut(folder_idx)
+            && folder.dir_path == dir
+        // 漂移校验：文件夹被删/索引移动时丢弃结果
         {
             for (i, tex) in buf.into_iter().enumerate() {
                 if start + i < folder.thumbnails.len() {
@@ -312,10 +333,15 @@ impl FolderManager {
             return;
         }
         let path = state.folder_cells[folder_idx].entries[entry_idx].clone();
+        let dir = state.folder_cells[folder_idx].dir_path.clone();
         self.spawn_loaders(
             vec![path],
             ctx,
-            LoadTarget::OpenEntry(folder_idx, entry_idx),
+            LoadTarget::OpenEntry {
+                folder_idx,
+                entry_idx,
+                dir,
+            },
         );
     }
 
@@ -343,24 +369,41 @@ impl FolderManager {
             .iter()
             .map(|&i| state.folder_cells[folder_idx].entries[i].clone())
             .collect();
+        let dir = state.folder_cells[folder_idx].dir_path.clone();
         self.spawn_loaders(
             paths,
             ctx,
             LoadTarget::OpenEntries {
                 folder_idx,
                 entry_idxs: sel,
+                dir,
             },
         );
     }
 
     /// 同步导航：所有打开的文件夹图片各自前进/后退一张（双文件夹对比索引）。
-    pub fn navigate(&mut self, ctx: &egui::Context, targets: Vec<(usize, usize, usize, PathBuf)>) {
+    /// 每个目标带 dir 做漂移校验。
+    pub fn navigate(
+        &mut self,
+        state: &mut AppState,
+        ctx: &egui::Context,
+        targets: Vec<(usize, usize, usize, PathBuf)>,
+    ) {
         if self.load_rx.is_some() || targets.is_empty() {
             return;
         }
         let paths: Vec<PathBuf> = targets.iter().map(|t| t.3.clone()).collect();
-        let index: Vec<(usize, usize, usize)> =
-            targets.into_iter().map(|t| (t.0, t.1, t.2)).collect();
+        let index: Vec<(usize, usize, usize, PathBuf)> = targets
+            .into_iter()
+            .map(|(img, fi, ei, _path)| {
+                let dir = state
+                    .folder_cells
+                    .get(fi)
+                    .map(|f| f.dir_path.clone())
+                    .unwrap_or_default();
+                (img, fi, ei, dir)
+            })
+            .collect();
         self.spawn_loaders(paths, ctx, LoadTarget::NavigateMany(index));
     }
 
@@ -433,10 +476,18 @@ impl FolderManager {
             return;
         }
         let buf = std::mem::take(&mut self.loading_buf);
+        let dir_matches = |state: &AppState, folder_idx: usize, dir: &PathBuf| {
+            state.folder_cells.get(folder_idx).map(|f| &f.dir_path) == Some(dir)
+        };
         match self.load_target.take() {
-            Some(LoadTarget::OpenEntry(folder_idx, entry_idx)) => {
+            Some(LoadTarget::OpenEntry {
+                folder_idx,
+                entry_idx,
+                dir,
+            }) => {
                 if let Some(Some(info)) = buf.into_iter().next()
-                    && folder_idx < state.folder_cells.len()
+                    && dir_matches(state, folder_idx, &dir)
+                // 漂移校验
                 {
                     state.open_folder_entry(folder_idx, entry_idx, info);
                 }
@@ -444,8 +495,9 @@ impl FolderManager {
             Some(LoadTarget::OpenEntries {
                 folder_idx,
                 entry_idxs,
+                dir,
             }) => {
-                if folder_idx < state.folder_cells.len() {
+                if dir_matches(state, folder_idx, &dir) {
                     for (i, slot) in buf.into_iter().enumerate() {
                         if let (Some(info), Some(&ei)) = (slot, entry_idxs.get(i)) {
                             state.open_folder_entry(folder_idx, ei, info);
@@ -455,10 +507,11 @@ impl FolderManager {
             }
             Some(LoadTarget::NavigateMany(targets)) => {
                 for (i, slot) in buf.into_iter().enumerate() {
-                    if let (Some(info), Some(&(img_idx, folder_idx, entry_idx))) =
+                    if let (Some(info), Some(&(img_idx, folder_idx, entry_idx, ref dir))) =
                         (slot, targets.get(i))
                         && img_idx < state.image_cells.len()
-                        && folder_idx < state.folder_cells.len()
+                        && dir_matches(state, folder_idx, dir)
+                    // 漂移校验
                     {
                         state.apply_navigated_image(img_idx, folder_idx, entry_idx, info);
                     }
@@ -892,9 +945,13 @@ mod tests {
         m.register_folder_cell(&mut s, PathBuf::from("b"), entries(20));
         // 模拟 A 已完成一批（offset=8），手动推进队列：队首 B 完成一批回队尾
         m.pending_thumbnails.pop_front(); // 取 B
-        m.pending_thumbnails.push_back((1, 8)); // B 未完成回队尾
+        m.pending_thumbnails.push_back((1, 8, PathBuf::from("b"))); // B 未完成回队尾
         assert_eq!(m.pending_thumbnails[0].0, 0, "A 回到队首，下一批加载 A");
-        assert_eq!(m.pending_thumbnails[1], (1, 8), "B 保留进度在队尾");
+        assert_eq!(
+            m.pending_thumbnails[1],
+            (1, 8, PathBuf::from("b")),
+            "B 保留进度在队尾"
+        );
     }
     #[test]
     fn thumb_limit_caps_prealloc_and_queue() {
@@ -906,7 +963,7 @@ mod tests {
             THUMB_LIMIT,
             "只预填上限个槽位"
         );
-        assert_eq!(m.pending_thumbnails[0], (0, 0));
+        assert_eq!(m.pending_thumbnails[0], (0, 0, PathBuf::from("big")));
         // 模拟推进到上限边界：offset >= THUMB_LIMIT 视为完成
         m.pending_thumbnails[0].1 = THUMB_LIMIT;
         // 直接验证 drain 的完成判定（不 spawn：entries 上限截断后 offset 已到顶）
@@ -914,5 +971,30 @@ mod tests {
         m.drain_thumbnails(&mut s, &ctx);
         assert!(m.thumb_rx.is_none(), "超限后不再启动缩略图批次");
         assert!(m.pending_thumbnails.is_empty(), "队列清空");
+    }
+    #[test]
+    fn thumb_queue_drops_stale_after_folder_index_shift() {
+        // 加载期间文件夹被删导致索引漂移：队列里的 dir 与当前位置不匹配 → 丢弃
+        let mut m = FolderManager::default();
+        let mut s = AppState::new();
+        m.register_folder_cell(&mut s, PathBuf::from("A"), entries(5));
+        // 模拟 remove_cell(Folder)：folder 0 被删，目录 B 顶到下标 0
+        s.folder_cells.remove(0);
+        s.folder_cells.push(FolderCell {
+            dir_path: PathBuf::from("B"),
+            entries: entries(5),
+            selected: HashSet::new(),
+            view_mode: FolderView::List,
+            scroll_offset: 0.0,
+            thumbnails: vec![None; 5],
+            open_entry: None,
+        });
+        s.cell_order.clear();
+        s.cell_order.push(CellKind::Folder(0));
+        // 队列里还是 (0, 0, dir="A") → 与 B 不匹配 → drain 应丢弃且不 spawn
+        let ctx = egui::Context::default();
+        m.drain_thumbnails(&mut s, &ctx);
+        assert!(m.pending_thumbnails.is_empty(), "漂移的缩略图请求被丢弃");
+        assert!(m.thumb_rx.is_none(), "未启动新批次");
     }
 }

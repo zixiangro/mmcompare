@@ -226,6 +226,9 @@ impl AppState {
             let Some(folder) = self.folder_cells.get(folder_idx) else {
                 continue;
             };
+            if folder.entries.is_empty() {
+                continue; // 防御：空条目时 clamp(0, -1) 会 panic
+            }
             let new_idx =
                 (entry_idx as i32 + delta).clamp(0, folder.entries.len() as i32 - 1) as usize;
             if new_idx != entry_idx {

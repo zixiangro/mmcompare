@@ -323,7 +323,7 @@ impl eframe::App for MmCompare {
                 let delta: i32 = if space { 1 } else { -1 };
                 let targets = self.state.folder_nav_targets(delta);
                 if !targets.is_empty() && self.state.folder_nav_allowed() {
-                    self.folder.navigate(ui.ctx(), targets);
+                    self.folder.navigate(&mut self.state, ui.ctx(), targets);
                 } else if space {
                     for fi in 0..self.state.folder_cells.len() {
                         if !self.state.folder_cells[fi].selected.is_empty() {
@@ -889,6 +889,7 @@ fn handle_drag(
 
     if resp.drag_stopped_by(egui::PointerButton::Primary)
         && let Some(cell) = state.drag_end()
+        && cell < state.image_cells.len() // 防御：拖拽期间该图片可能已被删除
         && let Some(sel) = state.image_cells[cell].selection
     {
         for img in &mut state.image_cells {
@@ -902,6 +903,7 @@ fn handle_drag(
     }
     if resp.drag_stopped_by(egui::PointerButton::Secondary)
         && let Some(cell) = state.drag_end()
+        && cell < state.image_cells.len() // 防御：拖拽期间该图片可能已被删除
         && let Some(sel) = state.image_cells[cell].selection
     {
         let stats = core::image::compute_selection_stats(
@@ -951,8 +953,8 @@ mod tests {
     use std::collections::HashSet;
     use std::fs;
 
-    fn setup() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mmc_mode_{}", std::process::id()));
+    fn setup(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mmc_mode_{}_{}", std::process::id(), tag));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("sub")).unwrap();
         fs::write(dir.join("a.png"), b"png").unwrap();
@@ -977,7 +979,7 @@ mod tests {
 
     #[test]
     fn undecided_mode_accepts_files() {
-        let tmp = setup();
+        let tmp = setup("accepts_files");
         let file = tmp.join("a.png");
         let mut app = MmCompare::default();
         let (files, dirs) = app.classify_paths(vec![file.clone()]);
@@ -988,7 +990,7 @@ mod tests {
 
     #[test]
     fn file_mode_rejects_folder() {
-        let tmp = setup();
+        let tmp = setup("rejects_folder");
         let ctx = egui::Context::default();
         let mut app = MmCompare::default();
         app.state
@@ -1000,7 +1002,7 @@ mod tests {
 
     #[test]
     fn file_loading_window_rejects_folder() {
-        let tmp = setup();
+        let tmp = setup("loading_window");
         let mut app = MmCompare::default();
         app.loading_total = 1; // 模拟文件批次加载中（图片尚未入 state）
         let (files, dirs) = app.classify_paths(vec![tmp.join("sub")]);
@@ -1013,7 +1015,7 @@ mod tests {
 
     #[test]
     fn folder_mode_rejects_files() {
-        let tmp = setup();
+        let tmp = setup("folder_mode");
         let mut app = MmCompare::default();
         app.state.folder_cells.push(FolderCell {
             dir_path: tmp.join("sub"),
@@ -1033,7 +1035,7 @@ mod tests {
     #[test]
     fn folder_scan_window_rejects_files() {
         // 目录刚拖入、扫描未登记期间（窗口期）也拒绝文件
-        let tmp = setup();
+        let tmp = setup("scan_window");
         let mut app = MmCompare::default();
         app.folder.queue_scan(vec![tmp.clone()]);
         assert!(app.folder.has_pending(), "扫描窗口期");
@@ -1044,7 +1046,7 @@ mod tests {
 
     #[test]
     fn mixed_batch_prefers_folder() {
-        let tmp = setup();
+        let tmp = setup("mixed_batch");
         let mut app = MmCompare::default();
         let (files, dirs) = app.classify_paths(vec![tmp.join("a.png"), tmp.join("sub")]);
         assert!(files.is_empty(), "同批混合时目录优先，文件被忽略");
