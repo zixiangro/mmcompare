@@ -8,24 +8,16 @@ on:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install system deps (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-18-dev
-
-      # Windows: gyan.dev full_build-shared 9.0.1（MSVC .lib + include + dll）
+      # gyan.dev full_build-shared 9.0.1（MSVC .lib + include + dll）
       # build.rs 会把 dll 拷到 target/，测试运行时直接可用
       - name: Fetch FFmpeg (Windows)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           Invoke-WebRequest -Uri https://github.com/GyanD/codexffmpeg/releases/download/9.0.1/ffmpeg-9.0.1-full_build-shared.zip -OutFile ffmpeg.zip
@@ -36,20 +28,6 @@ jobs:
           echo "CC=" >> $env:GITHUB_ENV
           echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $env:GITHUB_ENV
 
-      # Linux: BtbN lgpl-shared（master 9.x，.so + include）
-      - name: Fetch FFmpeg (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          curl -sL -o ffmpeg.tar.xz https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-lgpl-shared.tar.xz
-          tar -xf ffmpeg.tar.xz
-          dir=$(ls -d ffmpeg-* | head -1)
-          echo "FFMPEG_DIR=$PWD/$dir" >> $GITHUB_ENV
-          echo "LD_LIBRARY_PATH=$PWD/$dir/lib" >> $GITHUB_ENV
-          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> $GITHUB_ENV
-          echo "BINDGEN_EXTRA_CLANG_ARGS=" >> $GITHUB_ENV
-
-      # macOS: 暂缓（brew install ffmpeg 在 runner 上失败原因未明；bottle 直下方案已备好）
-
       - name: Build
         run: cargo build --release
 
@@ -59,5 +37,5 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mmcompare-${{ runner.os }}
+          name: mmcompare-windows
           path: target/release/mmcompare*
