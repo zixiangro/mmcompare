@@ -60,6 +60,11 @@ pub struct FolderManager {
     scan_total: usize,
     scan_received: usize,
     scan_buf: Vec<ScanResult>,
+    /// 排队等待扫描的目录批次（当前扫描批次完成后按序启动）。
+    pending_scan: VecDeque<Vec<PathBuf>>,
+    /// 待生成缩略图的 (文件夹下标, 下一个条目偏移)。
+    /// 调度：新目录 `push_front` 插队（后拖入的优先，方便及时对比），
+    /// `drain_thumbnails` 每批处理后未完成的回队尾（轮转，多目录均衡）。
     pending_thumbnails: VecDeque<(usize, usize)>,
 }
 
@@ -85,9 +90,22 @@ impl FolderManager {
         self.load_rx.is_some() || self.scan_rx.is_some()
     }
 
+    /// 排队扫描：当前无扫描批次时立即启动；扫描中则入队，
+    /// 当前批次完成后自动接续——拖入新目录不受旧目录加载进度影响。
+    pub fn queue_scan(&mut self, dirs: Vec<PathBuf>) {
+        if dirs.is_empty() {
+            return;
+        }
+        if self.scan_rx.is_none() {
+            self.scan_folders(dirs);
+        } else {
+            self.pending_scan.push_back(dirs);
+        }
+    }
+
     /// 启动一批目录扫描（子线程 read_dir + 过滤 + 排序），
     /// 结果由 `poll_scan` 收齐后登记为文件夹 cell。
-    pub fn scan_folders(&mut self, dirs: Vec<PathBuf>) {
+    fn scan_folders(&mut self, dirs: Vec<PathBuf>) {
         self.scan_total = dirs.len();
         self.scan_received = 0;
         self.scan_buf = (0..dirs.len()).map(|_| None).collect();
@@ -130,6 +148,9 @@ impl FolderManager {
         self.scan_rx = None;
         self.scan_total = 0;
         self.scan_received = 0;
+        if let Some(next) = self.pending_scan.pop_front() {
+            self.scan_folders(next);
+        }
     }
 
     /// 登记一个已扫描完成的文件夹 cell（网格满时跳过）。
@@ -152,10 +173,12 @@ impl FolderManager {
         state.pan_offset.push([0.0, 0.0]);
         let n = state.folder_cells[idx].entries.len();
         state.folder_cells[idx].thumbnails = (0..n).map(|_| None).collect();
-        self.pending_thumbnails.push_back((idx, 0));
+        // 新目录插队到队首：后拖入的优先加载，方便及时对比
+        self.pending_thumbnails.push_front((idx, 0));
     }
 
-    /// 缩略图分批：每次最多 `THUMB_BATCH` 张，队列按 (文件夹, 偏移) 推进。
+    /// 缩略图调度：取队首文件夹的一批（≤`THUMB_BATCH` 张），
+    /// 未完成的回队尾（轮转）——多目录交替加载，单目录自转不受影响。
     pub fn drain_thumbnails(&mut self, state: &mut AppState, ctx: &egui::Context) {
         if self.load_rx.is_some() || self.pending_thumbnails.is_empty() {
             return;
@@ -182,7 +205,11 @@ impl FolderManager {
                 start: offset,
             },
         );
-        self.pending_thumbnails[0].1 = end;
+        let done = end >= entries.len();
+        self.pending_thumbnails.pop_front();
+        if !done {
+            self.pending_thumbnails.push_back((fi, end));
+        }
     }
 
     /// 打开文件夹条目（每个文件夹同时最多 1 张，重复打开自动替换）。
@@ -774,4 +801,39 @@ fn fit_rect(outer: egui::Rect, img_size: egui::Vec2) -> egui::Rect {
         egui::pos2(outer.center().x - w / 2.0, outer.center().y - h / 2.0),
         egui::vec2(w, h),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entries(n: usize) -> Vec<PathBuf> {
+        (0..n)
+            .map(|i| PathBuf::from(format!("img{i}.png")))
+            .collect()
+    }
+
+    #[test]
+    fn new_folder_jumps_thumb_queue_front() {
+        let mut m = FolderManager::default();
+        let mut s = AppState::new();
+        m.register_folder_cell(&mut s, PathBuf::from("a"), entries(20));
+        m.register_folder_cell(&mut s, PathBuf::from("b"), entries(20));
+        assert_eq!(m.pending_thumbnails.len(), 2);
+        assert_eq!(m.pending_thumbnails[0].0, 1, "后拖入的 B 插队到队首");
+        assert_eq!(m.pending_thumbnails[1].0, 0);
+    }
+
+    #[test]
+    fn thumb_round_robin_rotates_unfinished_to_back() {
+        let mut m = FolderManager::default();
+        let mut s = AppState::new();
+        m.register_folder_cell(&mut s, PathBuf::from("a"), entries(20));
+        m.register_folder_cell(&mut s, PathBuf::from("b"), entries(20));
+        // 模拟 A 已完成一批（offset=8），手动推进队列：队首 B 完成一批回队尾
+        m.pending_thumbnails.pop_front(); // 取 B
+        m.pending_thumbnails.push_back((1, 8)); // B 未完成回队尾
+        assert_eq!(m.pending_thumbnails[0].0, 0, "A 回到队首，下一批加载 A");
+        assert_eq!(m.pending_thumbnails[1], (1, 8), "B 保留进度在队尾");
+    }
 }

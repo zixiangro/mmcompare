@@ -12,8 +12,9 @@
 拖拽 / 命令行传参（文件或目录）
   │
   ├─ 目录: ui/folder.rs（FolderManager 管线）
-  │     scan_folders() 子线程 read_dir → poll_scan() 登记入格
-  │     → 缩略图排队，分批（≤8 张）生成，JPEG 解码器级降采样
+  │     queue_scan() 排队（不受图片加载进度影响）→ scan_folders() 子线程 read_dir
+  │     → poll_scan() 登记入格（扫描批次完成后自动接续队列）
+  │     → 缩略图排队：新目录插队（最近优先）、分批轮转（≤8 张/批）
   │     → 打开/导航走同一管线的 OpenEntry/OpenEntries/NavigateMany
   │
   ├─ imlayout.rs 管线（standalone 图片）
@@ -21,7 +22,8 @@
   │     → poll_loading() 逐张上传 GPU → 收齐 append
   │
   └─ 两条管线各自独立批次（`load_rx`），互不覆盖；
-     加载期间新到的拖拽进入 pending_drops，空闲后按序处理
+     加载期间新到的图片文件进入 pending_drops，空闲后按序处理；
+     新目录始终立即接受（queue_scan 内部排队）
 ```
 
 加载期间新到的拖拽进入 `pending_drops`，待缩略图目录进入 `pending_thumbnails`，

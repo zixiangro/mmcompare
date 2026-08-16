@@ -247,14 +247,6 @@ impl AppState {
         counts
     }
 
-    /// 打开的文件夹图片总数。
-    pub fn folder_image_count(&self) -> usize {
-        self.image_cells
-            .iter()
-            .filter(|c| matches!(c.source, ImageSource::FromFolder { .. }))
-            .count()
-    }
-
     /// 导航条件：至少一个文件夹图片，且**每个文件夹打开 ≤1 张**——
     /// 同一文件夹多图时索引语义歧义，不响应 Space/B。
     pub fn folder_nav_allowed(&self) -> bool {
@@ -540,7 +532,7 @@ mod tests {
         s.open_folder_entry(fi, 0, make_info(&ctx, "a0"));
         s.open_folder_entry(fi, 1, make_info(&ctx, "a1"));
         assert_eq!(s.image_cells.len(), 2, "单文件夹可开多张");
-        assert_eq!(s.folder_image_count(), 2);
+        assert_eq!(s.folder_open_counts(), [2]);
         assert!(!s.folder_nav_allowed(), "同文件夹多图不响应导航");
         assert!(!s.is_compare_pair());
     }

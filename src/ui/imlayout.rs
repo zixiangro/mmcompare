@@ -93,11 +93,14 @@ impl MmCompare {
             self.spawn_loaders(file_paths, ctx);
         }
         if !folder_paths.is_empty() {
-            self.folder.scan_folders(folder_paths);
+            self.folder.queue_scan(folder_paths);
         }
     }
 
     /// 读取本帧的拖拽事件（egui 的 `dropped_files` 只保留一帧，读走即失）。
+    ///
+    /// 目录直接交给 folder 的扫描队列（立即接受，不受图片加载进度影响）；
+    /// 图片文件在加载中时缓存到 `pending_drops`，空闲后按序启动。
     fn poll_drops(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
         if dropped.is_empty() {
@@ -105,35 +108,26 @@ impl MmCompare {
         }
         let paths = dropped.into_iter().filter_map(|f| f.path).collect();
         let (file_paths, folder_paths) = self.classify_paths(paths);
-        if file_paths.is_empty() && folder_paths.is_empty() {
-            return;
-        }
-        if self.is_busy() {
+        if !file_paths.is_empty() && self.is_busy() {
             self.pending_drops.extend(file_paths);
-            self.pending_drops.extend(folder_paths);
-        } else {
-            if !file_paths.is_empty() {
-                self.spawn_loaders(file_paths, ctx);
-            }
-            if !folder_paths.is_empty() {
-                self.folder.scan_folders(folder_paths);
-            }
+        } else if !file_paths.is_empty() {
+            self.spawn_loaders(file_paths, ctx);
+        }
+        if !folder_paths.is_empty() {
+            self.folder.queue_scan(folder_paths);
         }
     }
 
-    /// 加载完成后，把缓存中的拖拽路径启动为新一批（重新分类：
+    /// 加载完成后，把缓存中的图片文件启动为新一批（重新分类：
     /// 缓存期间格子可能已被删除/加满，名额变了）。
     fn drain_pending_drops(&mut self, ctx: &egui::Context) {
         if self.is_busy() || self.pending_drops.is_empty() {
             return;
         }
         let paths = std::mem::take(&mut self.pending_drops);
-        let (file_paths, folder_paths) = self.classify_paths(paths);
+        let (file_paths, _folder_paths) = self.classify_paths(paths);
         if !file_paths.is_empty() {
             self.spawn_loaders(file_paths, ctx);
-        }
-        if !folder_paths.is_empty() {
-            self.folder.scan_folders(folder_paths);
         }
     }
 
