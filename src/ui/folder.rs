@@ -98,6 +98,12 @@ pub(crate) fn sort_paths(paths: &mut [PathBuf]) {
 }
 
 impl FolderManager {
+    /// 是否有未完成/未开始的目录扫描（文件夹模式判定用：
+    /// 目录从拖入到登记入格之间的窗口期也算文件夹模式）。
+    pub fn has_pending(&self) -> bool {
+        self.scan_rx.is_some() || !self.pending_scan.is_empty()
+    }
+
     /// 排队扫描：当前无扫描批次时立即启动；扫描中则入队，
     /// 当前批次完成后自动接续——拖入新目录不受旧目录加载进度影响。
     pub fn queue_scan(&mut self, dirs: Vec<PathBuf>) {

@@ -66,18 +66,31 @@ impl MmCompare {
 
     /// 把输入路径分类为图片文件与文件夹（去重、排序、标记、截断名额），
     /// 文件路径立即标记进 `loaded_paths`，避免同批重复入队。
+    ///
+    /// **模式互斥**：文件夹模式（已有目录/扫描队列）拒绝文件，
+    /// 文件模式（已有图片/加载中）拒绝目录；未定时按批次内容定模式
+    /// （同批混合时目录优先）。两种模式的逻辑不交互。
     fn classify_paths(&mut self, paths: Vec<PathBuf>) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let remaining = MAX_IMAGES
             .saturating_sub(self.state.cell_order.len())
             .saturating_sub(self.loading_total);
+        let folder_mode = !self.state.folder_cells.is_empty() || self.folder.has_pending();
+        let file_mode =
+            !folder_mode && (!self.state.image_cells.is_empty() || self.loading_total > 0);
+        let batch_has_dir = paths.iter().any(|p| p.is_dir());
+        let accept_dir = !file_mode;
+        let accept_file = !folder_mode && (!batch_has_dir || file_mode);
         let mut file_paths = Vec::new();
         let mut folder_paths = Vec::new();
         for p in paths.into_iter().take(remaining) {
             if p.is_dir() {
-                if !self.state.folder_cells.iter().any(|fc| fc.dir_path == p) {
+                if accept_dir && !self.state.folder_cells.iter().any(|fc| fc.dir_path == p) {
                     folder_paths.push(p);
                 }
-            } else if folder::is_image_ext(&p) && !self.state.loaded_paths.contains(&p) {
+            } else if accept_file
+                && folder::is_image_ext(&p)
+                && !self.state.loaded_paths.contains(&p)
+            {
                 file_paths.push(p);
             }
         }
@@ -929,4 +942,113 @@ fn find_cell_at(pos: Option<egui::Pos2>, layout: &GridLayout) -> Option<usize> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::{FolderCell, FolderView};
+    use std::collections::HashSet;
+    use std::fs;
+
+    fn setup() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("mmc_mode_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("sub")).unwrap();
+        fs::write(dir.join("a.png"), b"png").unwrap();
+        dir
+    }
+
+    fn make_info(ctx: &egui::Context, name: &str) -> ImageInfo {
+        let tex = ctx.load_texture(
+            name,
+            egui::ColorImage::new([4, 4], vec![egui::Color32::WHITE; 16]),
+            egui::TextureOptions::default(),
+        );
+        ImageInfo {
+            texture: tex,
+            size: [4, 4],
+            rgba: vec![255; 64],
+            path: PathBuf::from(name),
+            exif: String::new(),
+            histogram: [0; 256],
+        }
+    }
+
+    #[test]
+    fn undecided_mode_accepts_files() {
+        let tmp = setup();
+        let file = tmp.join("a.png");
+        let mut app = MmCompare::default();
+        let (files, dirs) = app.classify_paths(vec![file.clone()]);
+        assert_eq!(files, vec![file], "未定模式接受文件");
+        assert!(dirs.is_empty());
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn file_mode_rejects_folder() {
+        let tmp = setup();
+        let ctx = egui::Context::default();
+        let mut app = MmCompare::default();
+        app.state
+            .append_standalone_images(vec![make_info(&ctx, "a")]);
+        let (files, dirs) = app.classify_paths(vec![tmp.join("sub")]);
+        assert!(files.is_empty() && dirs.is_empty(), "文件模式拒绝目录");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn file_loading_window_rejects_folder() {
+        let tmp = setup();
+        let mut app = MmCompare::default();
+        app.loading_total = 1; // 模拟文件批次加载中（图片尚未入 state）
+        let (files, dirs) = app.classify_paths(vec![tmp.join("sub")]);
+        assert!(
+            files.is_empty() && dirs.is_empty(),
+            "文件加载窗口期拒绝目录"
+        );
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn folder_mode_rejects_files() {
+        let tmp = setup();
+        let mut app = MmCompare::default();
+        app.state.folder_cells.push(FolderCell {
+            dir_path: tmp.join("sub"),
+            entries: Vec::new(),
+            selected: HashSet::new(),
+            view_mode: FolderView::List,
+            scroll_offset: 0.0,
+            thumbnails: Vec::new(),
+            open_entry: None,
+        });
+        app.state.cell_order.push(CellKind::Folder(0));
+        let (files, dirs) = app.classify_paths(vec![tmp.join("a.png")]);
+        assert!(files.is_empty() && dirs.is_empty(), "文件夹模式拒绝文件");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn folder_scan_window_rejects_files() {
+        // 目录刚拖入、扫描未登记期间（窗口期）也拒绝文件
+        let tmp = setup();
+        let mut app = MmCompare::default();
+        app.folder.queue_scan(vec![tmp.clone()]);
+        assert!(app.folder.has_pending(), "扫描窗口期");
+        let (files, dirs) = app.classify_paths(vec![tmp.join("a.png")]);
+        assert!(files.is_empty() && dirs.is_empty(), "扫描窗口期拒绝文件");
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn mixed_batch_prefers_folder() {
+        let tmp = setup();
+        let mut app = MmCompare::default();
+        let (files, dirs) = app.classify_paths(vec![tmp.join("a.png"), tmp.join("sub")]);
+        assert!(files.is_empty(), "同批混合时目录优先，文件被忽略");
+        assert_eq!(dirs, vec![tmp.join("sub")]);
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }
