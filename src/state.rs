@@ -153,19 +153,23 @@ impl AppState {
         }
     }
 
-    /// 把文件夹条目打开为图片 cell（每个文件夹同时最多 1 张：
-    /// 再次打开同文件夹条目时替换已有图片，不新增 cell）。
-    /// 网格已满时拒绝；打开后从网格隐藏该文件夹 cell。
+    /// 把文件夹条目打开为图片 cell。
+    ///
+    /// 打开限制：**多文件夹（≥2）时每文件夹限 1 张**——重复打开同文件夹
+    /// 条目自动替换已有图片（不新增 cell）；**单文件夹可开多张**（唯一
+    /// 支持多图的场景）。网格已满时拒绝；打开后从网格隐藏该文件夹 cell。
     pub fn open_folder_entry(&mut self, folder_idx: usize, entry_idx: usize, info: ImageInfo) {
-        if let Some(pos) = self.image_cells.iter().position(|c| {
-            matches!(
-                c.source,
-                ImageSource::FromFolder {
-                    folder_idx: fi,
-                    ..
-                } if fi == folder_idx
-            )
-        }) {
+        if self.folder_cells.len() >= 2
+            && let Some(pos) = self.image_cells.iter().position(|c| {
+                matches!(
+                    c.source,
+                    ImageSource::FromFolder {
+                        folder_idx: fi,
+                        ..
+                    } if fi == folder_idx
+                )
+            })
+        {
             let cell = &mut self.image_cells[pos];
             cell.info = info;
             cell.selection = None;
@@ -230,12 +234,38 @@ impl AppState {
         targets
     }
 
-    /// 打开的文件夹图片数量（对比对判定用：≥2 才响应导航）。
+    /// 每个文件夹打开的图片数（事件响应的输入之一）。
+    pub fn folder_open_counts(&self) -> Vec<usize> {
+        let mut counts = vec![0usize; self.folder_cells.len()];
+        for cell in &self.image_cells {
+            if let ImageSource::FromFolder { folder_idx, .. } = cell.source
+                && let Some(c) = counts.get_mut(folder_idx)
+            {
+                *c += 1;
+            }
+        }
+        counts
+    }
+
+    /// 打开的文件夹图片总数。
     pub fn folder_image_count(&self) -> usize {
         self.image_cells
             .iter()
             .filter(|c| matches!(c.source, ImageSource::FromFolder { .. }))
             .count()
+    }
+
+    /// 导航条件：至少一个文件夹图片，且**每个文件夹打开 ≤1 张**——
+    /// 同一文件夹多图时索引语义歧义，不响应 Space/B。
+    pub fn folder_nav_allowed(&self) -> bool {
+        let counts = self.folder_open_counts();
+        !counts.is_empty() && counts.iter().all(|&c| c <= 1) && counts.iter().any(|&c| c == 1)
+    }
+
+    /// 对比对：恰好两个文件夹、各打开 1 张。此时**禁删图**（防误删对比图），
+    /// 用 Esc 退出对比恢复文件夹视图。
+    pub fn is_compare_pair(&self) -> bool {
+        self.folder_cells.len() == 2 && self.folder_open_counts() == [1, 1]
     }
 
     /// 导航加载完成后替换图片内容，并作废选区（像素已变）。
@@ -306,12 +336,21 @@ impl AppState {
                         *idx -= 1;
                     }
                 }
-                if was_folder_image
-                    && let Some(folder_idx) = folder_idx
-                    && let Some(folder) = self.folder_cells.get_mut(folder_idx)
-                {
-                    folder.open_entry = None;
-                    self.show_folder_cell(folder_idx);
+                if was_folder_image && let Some(folder_idx) = folder_idx {
+                    // 该文件夹还有其他打开图时保持隐藏，全部关完才恢复
+                    let still_open = self.image_cells.iter().any(|c| {
+                        matches!(
+                            c.source,
+                            ImageSource::FromFolder {
+                                folder_idx: fi,
+                                ..
+                            } if fi == folder_idx
+                        )
+                    });
+                    if !still_open && let Some(folder) = self.folder_cells.get_mut(folder_idx) {
+                        folder.open_entry = None;
+                        self.show_folder_cell(folder_idx);
+                    }
                 }
             }
             CellKind::Folder(folder_idx) => {
@@ -443,5 +482,144 @@ impl AppState {
             .iter()
             .all(|c| matches!(c, CellKind::Image(_)))
             && !self.cell_order.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use eframe::egui;
+
+    fn make_info(ctx: &egui::Context, name: &str) -> ImageInfo {
+        let tex = ctx.load_texture(
+            name,
+            egui::ColorImage::new([4, 4], vec![egui::Color32::WHITE; 16]),
+            egui::TextureOptions::default(),
+        );
+        ImageInfo {
+            texture: tex,
+            size: [4, 4],
+            rgba: vec![255; 64],
+            path: PathBuf::from(name),
+            exif: String::new(),
+            histogram: [0; 256],
+        }
+    }
+
+    fn add_folder(state: &mut AppState, n: usize) -> usize {
+        let idx = state.folder_cells.len();
+        state.folder_cells.push(FolderCell {
+            dir_path: PathBuf::from(format!("dir{idx}")),
+            entries: (0..n)
+                .map(|i| PathBuf::from(format!("dir{idx}/img{i}.png")))
+                .collect(),
+            selected: HashSet::new(),
+            view_mode: FolderView::List,
+            scroll_offset: 0.0,
+            thumbnails: vec![None; n],
+            open_entry: None,
+        });
+        state.cell_order.push(CellKind::Folder(idx));
+        state.pan_offset.push([0.0, 0.0]);
+        idx
+    }
+
+    fn image_pos(state: &AppState, img_idx: usize) -> usize {
+        state
+            .cell_order
+            .iter()
+            .position(|c| matches!(c, CellKind::Image(i) if *i == img_idx))
+            .expect("image cell in order")
+    }
+
+    #[test]
+    fn single_folder_allows_multi_open_but_no_nav() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fi = add_folder(&mut s, 5);
+        s.open_folder_entry(fi, 0, make_info(&ctx, "a0"));
+        s.open_folder_entry(fi, 1, make_info(&ctx, "a1"));
+        assert_eq!(s.image_cells.len(), 2, "单文件夹可开多张");
+        assert_eq!(s.folder_image_count(), 2);
+        assert!(!s.folder_nav_allowed(), "同文件夹多图不响应导航");
+        assert!(!s.is_compare_pair());
+    }
+
+    #[test]
+    fn single_folder_one_image_nav_allowed() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fi = add_folder(&mut s, 5);
+        s.open_folder_entry(fi, 0, make_info(&ctx, "a0"));
+        assert!(s.folder_nav_allowed(), "单文件夹 1 张可导航");
+        assert_eq!(s.folder_nav_targets(1).len(), 1);
+    }
+
+    #[test]
+    fn multi_folder_limits_one_per_folder() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fa = add_folder(&mut s, 5);
+        let fb = add_folder(&mut s, 5);
+        s.open_folder_entry(fa, 0, make_info(&ctx, "a0"));
+        s.open_folder_entry(fa, 1, make_info(&ctx, "a1"));
+        assert_eq!(s.image_cells.len(), 1, "多文件夹时重复打开自动替换");
+        assert!(s.folder_nav_allowed());
+        assert!(!s.is_compare_pair(), "单侧开图不是对比对");
+        s.open_folder_entry(fb, 0, make_info(&ctx, "b0"));
+        assert!(s.is_compare_pair(), "2 文件夹各 1 张构成对比对");
+        assert!(s.folder_nav_allowed());
+        assert_eq!(s.folder_nav_targets(1).len(), 2, "对比对同步索引两张");
+    }
+
+    #[test]
+    fn delete_down_to_one_restores_nav() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fi = add_folder(&mut s, 5);
+        s.open_folder_entry(fi, 0, make_info(&ctx, "a0"));
+        s.open_folder_entry(fi, 1, make_info(&ctx, "a1"));
+        // 删一张 → 剩 1 张 → 导航恢复
+        s.remove_cell(image_pos(&s, 0));
+        assert_eq!(s.image_cells.len(), 1);
+        assert!(s.folder_nav_allowed(), "删到 1 张恢复导航");
+    }
+
+    #[test]
+    fn delete_all_restores_folder_cell() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fi = add_folder(&mut s, 5);
+        s.open_folder_entry(fi, 0, make_info(&ctx, "a0"));
+        s.open_folder_entry(fi, 1, make_info(&ctx, "a1"));
+        s.remove_cell(image_pos(&s, 0));
+        assert!(
+            !s.cell_order
+                .iter()
+                .any(|c| matches!(c, CellKind::Folder(f) if *f == fi)),
+            "还有打开图时文件夹保持隐藏"
+        );
+        s.remove_cell(image_pos(&s, 0));
+        assert!(
+            s.cell_order
+                .iter()
+                .any(|c| matches!(c, CellKind::Folder(f) if *f == fi)),
+            "最后一张被删后文件夹恢复"
+        );
+    }
+
+    #[test]
+    fn compare_pair_remove_forbidden_by_ui_rule() {
+        // is_compare_pair 本身是 UI 层禁删的判定输入，这里验证状态判定
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fa = add_folder(&mut s, 5);
+        let fb = add_folder(&mut s, 5);
+        s.open_folder_entry(fa, 0, make_info(&ctx, "a0"));
+        s.open_folder_entry(fb, 0, make_info(&ctx, "b0"));
+        assert!(s.is_compare_pair());
+        // 破坏对比对（删掉一侧）→ 可删恢复
+        s.remove_cell(image_pos(&s, 0));
+        assert!(!s.is_compare_pair());
     }
 }

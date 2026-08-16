@@ -310,11 +310,11 @@ impl eframe::App for MmCompare {
                 }
                 changed = true;
             } else if !self.is_busy() {
-                // 对比对（≥2 个文件夹图片）才响应导航：同步推进每个文件夹的索引；
-                // 单文件夹 1 张时按 Space/B 无操作，避免歧义。
+                // 导航条件：每个文件夹打开 ≤1 张（单文件夹 1 张 / 多文件夹对比
+                // 对都响应，同步推进每个文件夹的索引；单文件夹多图不响应）。
                 let delta: i32 = if space { 1 } else { -1 };
                 let targets = self.state.folder_nav_targets(delta);
-                if !targets.is_empty() && self.state.folder_image_count() >= 2 {
+                if !targets.is_empty() && self.state.folder_nav_allowed() {
                     self.folder.navigate(ui.ctx(), targets);
                 } else if space {
                     for fi in 0..self.state.folder_cells.len() {
@@ -506,7 +506,9 @@ pub fn image_grid(
                     );
                 }
                 CellKind::Folder(folder_idx) => {
+                    // 对比对（2 文件夹各 1 张）禁删：防误删对比图，用 Esc 退出
                     if ctrl
+                        && !state.is_compare_pair()
                         && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
                         && ui
                             .input(|i| i.pointer.hover_pos())
@@ -632,7 +634,9 @@ fn render_image_cell(
     };
     let resp = ui.allocate_rect(cell_rect, sense);
 
+    // 对比对（2 文件夹各 1 张）禁删：防误删对比图，用 Esc 退出
     if ctrl
+        && !state.is_compare_pair()
         && resp.hovered()
         && ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary))
     {
