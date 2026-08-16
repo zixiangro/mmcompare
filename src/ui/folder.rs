@@ -195,6 +195,7 @@ impl FolderManager {
             scroll_offset: 0.0,
             thumbnails: Vec::new(),
             open_entry: None,
+            scroll_to: None,
         });
         state.cell_order.push(CellKind::Folder(idx));
         state.pan_offset.push([0.0, 0.0]);
@@ -733,6 +734,16 @@ fn render_list(
 ) -> FolderAction {
     let total_h = folder.entries.len() as f32 * ROW_H;
     let max_scroll = (total_h - cell_rect.height()).max(0.0);
+    // scroll_to：恢复视图时滚动，使目标条目（最小高亮索引）成为
+    // 可见区域**第二条**（顶部留一行上下文）；只处理一次，随后清除
+    if let Some(target) = folder
+        .scroll_to
+        .take()
+        .or_else(|| folder.selected.iter().min().copied())
+    {
+        let want = target.saturating_sub(1) as f32 * ROW_H;
+        folder.scroll_offset = want.clamp(0.0, max_scroll);
+    }
     folder.scroll_offset = (folder.scroll_offset - scroll_delta).clamp(0.0, max_scroll);
     let base_y = cell_rect.top() - folder.scroll_offset;
     let menu_action = std::rc::Rc::new(std::cell::RefCell::new(None));
@@ -845,6 +856,21 @@ fn render_grid(
     let rows = folder.entries.len().div_ceil(cols);
     let grid_h = rows as f32 * (GRID_CELL + GRID_PAD) + GRID_PAD;
     let max_scroll = (grid_h - cell_rect.height()).max(0.0);
+    // scroll_to：恢复视图时滚动，使目标条目（最小高亮索引）成为
+    // 可见区域**第二条**（顶部留一行上下文）；只处理一次，随后清除
+    if let Some(target) = folder
+        .scroll_to
+        .take()
+        .or_else(|| folder.selected.iter().min().copied())
+    {
+        let row = target / cols;
+        let want = if row > 0 {
+            GRID_PAD + (row - 1) as f32 * (GRID_CELL + GRID_PAD)
+        } else {
+            0.0
+        };
+        folder.scroll_offset = want.clamp(0.0, max_scroll);
+    }
     folder.scroll_offset = (folder.scroll_offset - scroll_delta).clamp(0.0, max_scroll);
     let base_y = cell_rect.top() - folder.scroll_offset + GRID_PAD;
     let start_x = cell_rect.left()
@@ -1064,6 +1090,7 @@ mod tests {
             scroll_offset: 0.0,
             thumbnails: vec![None; 5],
             open_entry: None,
+            scroll_to: None,
         });
         s.cell_order.clear();
         s.cell_order.push(CellKind::Folder(0));

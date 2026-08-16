@@ -84,6 +84,9 @@ pub struct FolderCell {
     pub scroll_offset: f32,
     pub thumbnails: Vec<Option<eframe::egui::TextureHandle>>,
     pub open_entry: Option<usize>,
+    /// 请求滚动到条目（恢复视图后由渲染层调整 `scroll_offset` 并清除）：
+    /// 退出对比时导航位置在视口外，只高亮看不到。
+    pub scroll_to: Option<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -347,10 +350,11 @@ impl AppState {
                     });
                     if !still_open && let Some(folder) = self.folder_cells.get_mut(folder_idx) {
                         // 退出位置记忆：导航后的当前条目写回选中，恢复视图后
-                        // 仍高亮/可继续打开退出时的图片
+                        // 仍高亮/可继续打开退出时的图片；同时请求滚动到该条目
                         if let Some(entry) = folder.open_entry {
                             folder.selected.clear();
                             folder.selected.insert(entry);
+                            folder.scroll_to = Some(entry);
                         }
                         folder.open_entry = None;
                         restore = Some((folder_idx, cell_order_pos));
@@ -526,6 +530,7 @@ mod tests {
             scroll_offset: 0.0,
             thumbnails: vec![None; n],
             open_entry: None,
+            scroll_to: None,
         });
         state.cell_order.push(CellKind::Folder(idx));
         state.pan_offset.push([0.0, 0.0]);
@@ -727,6 +732,11 @@ mod tests {
         assert!(
             s.folder_cells[fa].selected.contains(&5),
             "选中回到退出时的图片位置"
+        );
+        assert_eq!(
+            s.folder_cells[fa].scroll_to,
+            Some(5),
+            "请求滚动到退出位置（渲染层据此定位到第二条）"
         );
         assert_eq!(s.folder_cells[fa].open_entry, None, "open_entry 已清空");
         assert!(

@@ -1025,6 +1025,7 @@ mod tests {
             scroll_offset: 0.0,
             thumbnails: Vec::new(),
             open_entry: None,
+            scroll_to: None,
         });
         app.state.cell_order.push(CellKind::Folder(0));
         let (files, dirs) = app.classify_paths(vec![tmp.join("a.png")]);
