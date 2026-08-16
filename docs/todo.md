@@ -41,15 +41,16 @@
 
 ### M2 视频 cell（单视频播放闭环）
 
-- [ ] `state.rs`：`CellKind::Video(usize)` + `video_cells` 存储 + 索引约定维护；`MAX_VIDEOS = 4`（D3）
-- [ ] `classify_paths` 扩展识别视频扩展名，拖拽/命令行打开
-- [ ] 解码管线：子线程 + mpsc 帧通道（ADR-0001/0003：线程原语只进加载方法组）
-- [ ] `ui/video.rs`：帧纹理上传、居中绘制、letterbox、控制条（播放/暂停/进度条）
-- [ ] 播放时钟：主线程状态机 + `request_repaint`
-- [ ] 交互 D1：Space 播放/暂停；`←`/`→` ±5s；`↑`/`↓` 帧步进；`Ctrl`+箭头仅调 hover 视频
-- [ ] 交互 D2：视频模式屏蔽 E/H/P 与重排；Esc 仅文件夹打开时返回
-- [ ] 失败路径：解码失败进 `load_errors` + 重拖重试
-- ✅ 验收：单视频全交互可用；质量门（check/clippy/fmt/build/test）全绿
+- [x] `state.rs`：`CellKind::Video(usize)` + `video_cells` 存储 + 索引约定维护；`MAX_VIDEOS = 4`（D3）
+- [x] `classify_paths` 识别视频扩展名（is_video_ext），拖拽/命令行打开；视频批优先切视频模式（M2 简化：清空图片/文件夹，M3 改保留状态切换）
+- [x] 解码管线：`spawn_video_worker` 子线程 + mpsc 帧通道（ADR-0001/0003：线程原语只进 imlayout 加载方法组；rx 被主线程丢弃即停止）
+- [x] `ui/video.rs`：帧纹理上传、居中绘制（letterbox）、控制条（播放/暂停、进度 seek、时间）
+- [x] 播放时钟：帧驱动（worker 按帧率发帧，position 跟随 pts；暂停时 seek/步进由单帧 worker 完成）
+- [x] 交互 D1：Space 播放/暂停；`←`/`→` ±5s；`↑`/`↓` 帧步进；`Ctrl`+箭头仅调 hover 视频
+- [x] 交互 D2：视频模式屏蔽 E/H/P（is_all_images=false 自然隔离）、无缩放平移/重排
+- [x] 失败路径：首帧失败进 `load_errors` + 移除 loaded_paths（重拖重试）；播放中失败标记 cell.failed
+- [ ] **验收：GUI 手动验证**（拖入 sample 或真实视频：播放/暂停/seek/步进/进度条/删除）；CI 已跑（44 测试）
+- [ ] Esc 返回文件夹视图：M2 无文件夹来源的视频，留 M4（对比对）一并做
 
 ### M3 模式切换（Ctrl+Tab）
 

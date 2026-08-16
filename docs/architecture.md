@@ -40,7 +40,9 @@
 | `src/ui/imlayout.rs` | 应用主体 `MmCompare`：键盘事件、standalone 图片加载管线、网格布局 `image_grid`、交互编排（拖拽/重排/删除/缩放） | `ui()` 每帧顺序是刻意的：**键盘 → 管线轮询 → 渲染** |
 | `src/ui/folder.rs` | 文件夹子系统 `FolderManager`：目录扫描、缩略图分批调度、打开/导航加载管线、`FolderAction` 处理、文件夹 cell 渲染 | 三条独立管线（`scan_rx`/`thumb_rx`/`load_rx`）；调度策略：新目录插队、轮转、`THUMB_LIMIT` 上限 |
 | `src/ui/imcell.rs` | 图片 cell 的纯绘制：居中、覆盖层、直方图、纹理重建、旋转封装 | 不碰 state，返回数据由调用方写回 |
+| `src/ui/video.rs` | 视频 cell 的纯绘制：帧居中（letterbox）、控制条（播放/暂停、进度 seek、时间） | 不碰 state，交互意图以 `VideoAction` 返回由 imlayout 写回 |
 | `src/core/image.rs` | 纯像素算法：解码、缩略图（JPEG 降采样）、旋转、直方图、选区统计、EXIF | 无 GUI 类型，可独立单测 |
+| `src/core/video.rs` | 视频解码封装：`VideoDecoder`（seek 解码 / 连续播放解码）、首帧提取、降采样 | 无 GUI 类型；解码线程只在本模块与 imlayout 的 worker 之间 |
 
 ## 核心概念
 
@@ -49,7 +51,7 @@
 一切显示内容都是 cell，网格布局（`image_grid`）只认识两类：
 
 ```rust
-enum CellKind { Image(usize), Folder(usize) }  // usize = 存储 vec 的下标
+enum CellKind { Image(usize), Folder(usize), Video(usize) }  // usize = 存储 vec 的下标
 ```
 
 - `image_cells` / `folder_cells`：**实际存储**，删除元素下标会移动；
@@ -80,6 +82,8 @@ enum CellKind { Image(usize), Folder(usize) }  // usize = 存储 vec 的下标
 | 目录扫描 | folder | 路径列表 | 队列接续（`queue_scan`） |
 | 缩略图 | folder | 64px 图 | 每批 8 张、插队+轮转、上限 200 |
 | 打开/导航 | folder | 全图 | OpenEntry/OpenEntries/NavigateMany |
+| 视频首帧 | imlayout | info + 首帧（≤1280 降采样） | 收齐按序 append |
+| 视频播放/seek | imlayout | RGB 帧（按 path 关联 cell） | 每视频一个 worker；rx 丢弃即停 |
 
 **线程隔离（ADR-0001）**：线程原语只允许出现在 imlayout 与 folder 的加载/扫描方法组；其余模块纯主线程。
 

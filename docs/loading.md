@@ -22,8 +22,15 @@
   │     spawn_loaders() → 子线程：读文件 → decode → EXIF → 直方图 → mpsc
   │     → poll_loading() 逐张上传 GPU → 收齐 append
   │
-  └─ 两条管线各自独立批次（`load_rx`），互不覆盖；
-     加载期间新到的图片文件进入 pending_drops，空闲后按序处理；
+  ├─ imlayout.rs 管线（视频，M2）
+  │     首帧：spawn_video_loaders() → 子线程 read_info + first_frame（降采样 ≤1280）
+  │     → poll_video_loading() 上传纹理 → 收齐 append_videos
+  │     播放/seek：spawn_video_worker() 子线程 VideoDecoder（seek→解码→swscale→mpsc），
+  │     每帧 sleep 1/fps（播放）或发一帧即退（seek/步进）；rx 被主线程丢弃即停止
+  │     → poll_video() 上传纹理 + 更新 position/playing；会话结束自动移除
+  │
+  └─ 各管线各自独立批次（`load_rx` / `video_load_rx`），互不覆盖；
+     加载期间新到的文件进入 pending_drops，空闲后按序处理；
      新目录始终立即接受（queue_scan 内部排队）
 ```
 
