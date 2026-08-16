@@ -18,6 +18,7 @@
 | [folder.md](folder.md) | 稳定 | 研发 | 文件夹 cell：扫描、缩略图、打开/导航 | 文件夹交互、加载调度变化 |
 | [local-mode.md](local-mode.md) | 稳定 | 研发 | 局部模式、归一化坐标、亮度计算 | 选择框交互、统计公式变化 |
 | [egui-api.md](egui-api.md) | 参考 | 研发 | egui 0.35 与旧版 API 差异备忘 | egui 版本升级、踩到新的 API 坑 |
+| [todo.md](todo.md) | 进行中 | 研发 | 视频对比开发计划（里程碑/决策/验收） | 开发计划变化、决策拍板 |
 | [decisions/](decisions/README.md) | 稳定 | 研发 | 架构决策记录（ADR） | 新架构决策；既有决策被推翻时更新对应 ADR |
 
 ## 文档维护规则
