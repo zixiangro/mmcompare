@@ -67,7 +67,12 @@ imlayout 只做编排调用；图片 cell 渲染在 `ui/imcell.rs`。
 - **打开**：`open_entry`（双击）或 `open_selected_all`（空格，拍平所有文件夹的
   选中条目为一个批次）→ 异步加载全图 → `open_folder_entry`：
   多文件夹时每文件夹限 1 张（重复打开替换），单文件夹可开多张；
-  文件夹 cell 隐藏（`open_entry` 记录当前条目）。
+  **图片占据被隐藏文件夹的原位置**（左文件夹的图在左 cell，右同理）；
+  `open_entry` 记录当前条目。
+- **关闭/删除后的原位恢复**：`remove_cell` 删除文件夹图片后，文件夹
+  `insert` 回图片原位置（不再 append 末尾），左右对应在关闭后也保持。
+- **同批排序**：同一批次（一次拖入/一次命令行）的文件夹按名字排序
+  （保证同时拖入时两栏同索引对应）；依次拖入（每批单个）保持拖入顺序。
 - **联动选择**：无修饰单击返回 `FolderAction::SelectSynced`，由 imlayout
   统一设置所有文件夹的 `selected`（渲染层不跨 folder 操作）；`Ctrl`+单击
   只替换当前栏。

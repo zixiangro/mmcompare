@@ -95,6 +95,9 @@ impl MmCompare {
             }
         }
         folder::sort_paths(&mut file_paths);
+        // 同一批次（一次拖入/一次命令行）的文件夹按名字排序，保证对比时
+        // 两栏同索引条目对应；依次拖入（每批单个）不受影响，保持拖入顺序。
+        folder::sort_paths(&mut folder_paths);
         for p in &file_paths {
             self.state.loaded_paths.insert(p.clone());
         }
@@ -1049,5 +1052,25 @@ mod tests {
         assert!(files.is_empty(), "同批混合时目录优先，文件被忽略");
         assert_eq!(dirs, vec![tmp.join("sub")]);
         let _ = fs::remove_dir_all(&tmp);
+    }
+    #[test]
+    fn same_batch_folders_are_sorted() {
+        // 同时拖入（同一批次）的文件夹按名字排序；依次拖入（每批单个）不受影响
+        let dir = std::env::temp_dir().join(format!("mmc_sort_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("z_folder")).unwrap();
+        fs::create_dir_all(dir.join("a_folder")).unwrap();
+        let mut app = MmCompare::default();
+        let (files, dirs) = app.classify_paths(vec![dir.join("z_folder"), dir.join("a_folder")]);
+        assert!(files.is_empty());
+        assert_eq!(
+            dirs,
+            vec![dir.join("a_folder"), dir.join("z_folder")],
+            "同批文件夹按名字排序"
+        );
+        // 单目录批次：保持原样（排序对单个无影响）
+        let (_, dirs2) = app.classify_paths(vec![dir.join("z_folder")]);
+        assert_eq!(dirs2, vec![dir.join("z_folder")]);
+        let _ = fs::remove_dir_all(&dir);
     }
 }

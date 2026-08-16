@@ -200,17 +200,20 @@ impl AppState {
                 entry_idx,
             },
         ));
-        self.cell_order.push(CellKind::Image(img_idx));
-        self.pan_offset.push([0.0, 0.0]);
-        self.folder_cells[folder_idx].open_entry = Some(entry_idx);
-        if let Some(fpos) = self
+        // 图片占据被隐藏文件夹的**原位置**：左文件夹的图在左 cell，右同理
+        // （依次打开时顺序也始终与文件夹对应）。
+        let fpos = self
             .cell_order
             .iter()
-            .position(|c| matches!(c, CellKind::Folder(fi) if *fi == folder_idx))
-        {
-            self.cell_order.remove(fpos);
-            self.pan_offset.remove(fpos);
+            .position(|c| matches!(c, CellKind::Folder(fi) if *fi == folder_idx));
+        if let Some(fpos) = fpos {
+            self.cell_order[fpos] = CellKind::Image(img_idx);
+            self.pan_offset[fpos] = [0.0, 0.0];
+        } else {
+            self.cell_order.push(CellKind::Image(img_idx));
+            self.pan_offset.push([0.0, 0.0]);
         }
+        self.folder_cells[folder_idx].open_entry = Some(entry_idx);
     }
 
     /// 导航（Space/B）的目标条目：所有打开的文件夹图片各自的下一条/上一条。
@@ -304,21 +307,13 @@ impl AppState {
         }
     }
 
-    fn show_folder_cell(&mut self, folder_idx: usize) {
-        if !self
-            .cell_order
-            .iter()
-            .any(|c| matches!(c, CellKind::Folder(fi) if *fi == folder_idx))
-        {
-            self.cell_order.push(CellKind::Folder(folder_idx));
-            self.pan_offset.push([0.0, 0.0]);
-        }
-    }
-
     pub fn remove_cell(&mut self, cell_order_pos: usize) {
         let Some(&cell_kind) = self.cell_order.get(cell_order_pos) else {
             return;
         };
+        // 待恢复的文件夹 (下标, 原位)：从文件夹打开的图片删除后，
+        // 文件夹恢复到图片占据的原位置（保持左右对应）。
+        let mut restore: Option<(usize, usize)> = None;
         match cell_kind {
             CellKind::Image(img_idx) => {
                 let was_folder_image = matches!(
@@ -340,7 +335,7 @@ impl AppState {
                     }
                 }
                 if was_folder_image && let Some(folder_idx) = folder_idx {
-                    // 该文件夹还有其他打开图时保持隐藏，全部关完才恢复
+                    // 该文件夹还有其他打开图时保持隐藏，全部关完才恢复原位
                     let still_open = self.image_cells.iter().any(|c| {
                         matches!(
                             c.source,
@@ -352,7 +347,7 @@ impl AppState {
                     });
                     if !still_open && let Some(folder) = self.folder_cells.get_mut(folder_idx) {
                         folder.open_entry = None;
-                        self.show_folder_cell(folder_idx);
+                        restore = Some((folder_idx, cell_order_pos));
                     }
                 }
             }
@@ -387,6 +382,10 @@ impl AppState {
         }
         self.cell_order.remove(cell_order_pos);
         self.pan_offset.remove(cell_order_pos);
+        if let Some((folder_idx, pos)) = restore {
+            self.cell_order.insert(pos, CellKind::Folder(folder_idx));
+            self.pan_offset.insert(pos, [0.0, 0.0]);
+        }
     }
 
     pub fn drag_start_new(&mut self, cell: usize, norm: [f32; 2]) {
@@ -657,5 +656,49 @@ mod tests {
         );
         s.open_folder_entry(fi, 8, make_info(&ctx, "f8"));
         assert_eq!(s.image_cells.len(), 8, "第 9 张被拒");
+    }
+    #[test]
+    fn open_image_keeps_folder_position() {
+        // 左文件夹的图占据左 cell（原文件夹位置），依次打开也不串位
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fa = add_folder(&mut s, 5);
+        let fb = add_folder(&mut s, 5);
+        s.open_folder_entry(fa, 0, make_info(&ctx, "a0"));
+        assert!(
+            matches!(s.cell_order[0], CellKind::Image(_)),
+            "A 的图占据 A 的原位置（左 cell）"
+        );
+        assert!(
+            matches!(s.cell_order[1], CellKind::Folder(f) if f == fb),
+            "B 的文件夹仍在右 cell"
+        );
+        s.open_folder_entry(fb, 0, make_info(&ctx, "b0"));
+        assert_eq!(s.cell_order.len(), 2);
+        // 左 cell 是 A 的图（source folder_idx == fa）
+        let CellKind::Image(a_img) = s.cell_order[0] else {
+            panic!("left cell is image");
+        };
+        assert!(
+            matches!(s.image_cells[a_img].source, ImageSource::FromFolder { folder_idx, .. } if folder_idx == fa),
+            "左 cell = 左文件夹的图"
+        );
+    }
+
+    #[test]
+    fn remove_restores_folder_to_original_position() {
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fa = add_folder(&mut s, 5);
+        let fb = add_folder(&mut s, 5);
+        s.open_folder_entry(fa, 0, make_info(&ctx, "a0"));
+        s.open_folder_entry(fb, 0, make_info(&ctx, "b0"));
+        // 删左图 → 左 folder 恢复到原位 0
+        s.remove_cell(0);
+        assert!(
+            matches!(s.cell_order[0], CellKind::Folder(f) if f == fa),
+            "A 恢复原位"
+        );
+        assert!(matches!(s.cell_order[1], CellKind::Image(_)), "B 图仍在右");
     }
 }
