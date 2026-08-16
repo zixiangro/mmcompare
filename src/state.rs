@@ -346,6 +346,12 @@ impl AppState {
                         )
                     });
                     if !still_open && let Some(folder) = self.folder_cells.get_mut(folder_idx) {
+                        // 退出位置记忆：导航后的当前条目写回选中，恢复视图后
+                        // 仍高亮/可继续打开退出时的图片
+                        if let Some(entry) = folder.open_entry {
+                            folder.selected.clear();
+                            folder.selected.insert(entry);
+                        }
                         folder.open_entry = None;
                         restore = Some((folder_idx, cell_order_pos));
                     }
@@ -700,5 +706,34 @@ mod tests {
             "A 恢复原位"
         );
         assert!(matches!(s.cell_order[1], CellKind::Image(_)), "B 图仍在右");
+    }
+    #[test]
+    fn esc_restores_selection_to_navigated_position() {
+        // 打开 → 导航 → Esc：文件夹选中回到退出时的图片位置
+        let ctx = egui::Context::default();
+        let mut s = AppState::new();
+        let fa = add_folder(&mut s, 10);
+        s.open_folder_entry(fa, 2, make_info(&ctx, "a2"));
+        // 模拟 Space 导航到第 5 张
+        s.apply_navigated_image(0, fa, 5, make_info(&ctx, "a5"));
+        assert_eq!(s.folder_cells[fa].open_entry, Some(5));
+        // Esc 关闭
+        let pos = s
+            .cell_order
+            .iter()
+            .position(|c| matches!(c, CellKind::Image(_)))
+            .unwrap();
+        s.close_folder_at_pos(pos);
+        assert!(
+            s.folder_cells[fa].selected.contains(&5),
+            "选中回到退出时的图片位置"
+        );
+        assert_eq!(s.folder_cells[fa].open_entry, None, "open_entry 已清空");
+        assert!(
+            s.cell_order
+                .iter()
+                .any(|c| matches!(c, CellKind::Folder(f) if *f == fa)),
+            "文件夹恢复"
+        );
     }
 }
