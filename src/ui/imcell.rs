@@ -452,9 +452,10 @@ fn render_grid(
 
         let thumb = gc.shrink(4.0);
         if let Some(tex) = folder.thumbnails.get(i).and_then(|t| t.as_ref()) {
+            let fit = fit_rect(thumb, tex.size_vec2());
             ui.painter().image(
                 tex.id(),
-                thumb,
+                fit,
                 egui::Rect::from_min_max(egui::Pos2::ZERO, egui::pos2(1.0, 1.0)),
                 egui::Color32::WHITE,
             );

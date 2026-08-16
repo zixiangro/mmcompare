@@ -23,7 +23,7 @@
 //!
 //! 完整流程见 docs/loading.md 与 docs/layout.md。
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
@@ -38,13 +38,18 @@ use super::imcell;
 
 const SEP: f32 = 1.0;
 const MARGIN: f32 = 6.0;
+/// 缩略图单批并发上限：同时解码的原图数 × (文件字节 + 解码缓冲) 即峰值内存。
+const THUMB_BATCH: usize = 8;
 
 type LoadResult = Result<(core::image::DecodedImage, String, [u32; 256]), PathBuf>;
 
 /// 本批加载结果的分发目标。
 enum LoadTarget {
     Standalone,
-    Thumbnails(usize),
+    Thumbnails {
+        folder_idx: usize,
+        start: usize,
+    },
     OpenEntry(usize, usize),
     OpenEntries {
         folder_idx: usize,
@@ -68,7 +73,8 @@ pub struct MmCompare {
     scan_received: usize,
     scan_buf: Vec<ScanResult>,
     pending_drops: Vec<PathBuf>,
-    pending_thumbnails: Vec<usize>,
+    /// 待生成缩略图的 (文件夹下标, 下一个条目偏移)；每批限 `THUMB_BATCH` 张。
+    pending_thumbnails: VecDeque<(usize, usize)>,
 }
 
 impl Default for MmCompare {
@@ -85,7 +91,7 @@ impl Default for MmCompare {
             scan_received: 0,
             scan_buf: Vec::new(),
             pending_drops: Vec::new(),
-            pending_thumbnails: Vec::new(),
+            pending_thumbnails: VecDeque::new(),
         }
     }
 }
@@ -240,6 +246,7 @@ impl MmCompare {
     }
 
     /// 登记一个已扫描完成的文件夹 cell（网格满时跳过）。
+    /// `thumbnails` 预填 `None` 与 `entries` 等长，分批写入时按槽位对齐。
     fn register_folder_cell(&mut self, dir: PathBuf, entries: Vec<PathBuf>) {
         if self.state.cell_order.len() >= MAX_IMAGES {
             return;
@@ -256,23 +263,40 @@ impl MmCompare {
         });
         self.state.cell_order.push(CellKind::Folder(idx));
         self.state.pan_offset.push([0.0, 0.0]);
-        self.pending_thumbnails.push(idx);
+        let n = self.state.folder_cells[idx].entries.len();
+        self.state.folder_cells[idx].thumbnails = (0..n).map(|_| None).collect();
+        self.pending_thumbnails.push_back((idx, 0));
     }
 
-    /// 为排队中的文件夹启动缩略图批次（每帧检查，加载空闲时执行）。
+    /// 缩略图分批：每次最多 `THUMB_BATCH` 张，队列按 (文件夹, 偏移) 推进。
+    /// 限并发同时控制峰值内存（8 张原图解码缓冲 + 文件字节）。
     fn drain_pending_thumbnails(&mut self, ctx: &egui::Context) {
         if self.is_loading() || self.pending_thumbnails.is_empty() {
             return;
         }
-        let fi = self.pending_thumbnails.remove(0);
+        let (fi, offset) = self.pending_thumbnails[0];
         let entries = match self.state.folder_cells.get(fi) {
             Some(f) => f.entries.clone(),
-            None => return,
+            None => {
+                self.pending_thumbnails.pop_front();
+                return;
+            }
         };
-        if entries.is_empty() {
+        if offset >= entries.len() {
+            self.pending_thumbnails.pop_front();
             return;
         }
-        self.spawn_loaders(entries, ctx, LoadTarget::Thumbnails(fi));
+        let end = (offset + THUMB_BATCH).min(entries.len());
+        let batch = entries[offset..end].to_vec();
+        self.spawn_loaders(
+            batch,
+            ctx,
+            LoadTarget::Thumbnails {
+                folder_idx: fi,
+                start: offset,
+            },
+        );
+        self.pending_thumbnails[0].1 = end;
     }
 
     /// 启动一批加载：每张图一个临时线程。`thumb` 模式解码 64x64 缩略图，
@@ -282,7 +306,7 @@ impl MmCompare {
         self.loading_received = 0;
         self.loading_buf = (0..paths.len()).map(|_| None).collect();
         self.state.load_errors.clear();
-        let thumb = matches!(target, LoadTarget::Thumbnails(_));
+        let thumb = matches!(target, LoadTarget::Thumbnails { .. });
         self.load_target = Some(target);
         let (tx, rx) = mpsc::channel();
 
@@ -362,10 +386,12 @@ impl MmCompare {
         if self.loading_received >= self.loading_total {
             let buf = std::mem::take(&mut self.loading_buf);
             match self.load_target.take() {
-                Some(LoadTarget::Thumbnails(folder_idx)) => {
+                Some(LoadTarget::Thumbnails { folder_idx, start }) => {
                     if let Some(folder) = self.state.folder_cells.get_mut(folder_idx) {
-                        for slot in buf {
-                            folder.thumbnails.push(slot.map(|info| info.texture));
+                        for (i, slot) in buf.into_iter().enumerate() {
+                            if start + i < folder.thumbnails.len() {
+                                folder.thumbnails[start + i] = slot.map(|info| info.texture);
+                            }
                         }
                     }
                 }
@@ -484,18 +510,26 @@ impl MmCompare {
                             .copied()
                             .collect();
                         if !sel.is_empty() && !self.is_loading() {
-                            let paths: Vec<PathBuf> = sel
-                                .iter()
-                                .map(|&i| self.state.folder_cells[fi].entries[i].clone())
-                                .collect();
-                            self.spawn_loaders(
-                                paths,
-                                ctx,
-                                LoadTarget::OpenEntries {
-                                    folder_idx: fi,
-                                    entry_idxs: sel,
-                                },
-                            );
+                            // 打开后文件夹 cell 隐藏腾出 1 格，净增 = 张数 - 1；
+                            // 全选海量条目时按剩余名额截断，防止无限增长。
+                            let room = MAX_IMAGES
+                                .saturating_sub(self.state.cell_order.len())
+                                .saturating_add(1);
+                            let sel: Vec<usize> = sel.into_iter().take(room).collect();
+                            if !sel.is_empty() {
+                                let paths: Vec<PathBuf> = sel
+                                    .iter()
+                                    .map(|&i| self.state.folder_cells[fi].entries[i].clone())
+                                    .collect();
+                                self.spawn_loaders(
+                                    paths,
+                                    ctx,
+                                    LoadTarget::OpenEntries {
+                                        folder_idx: fi,
+                                        entry_idxs: sel,
+                                    },
+                                );
+                            }
                         }
                         break;
                     }

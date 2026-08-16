@@ -26,15 +26,54 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
 
 /// 解码并缩放到方形缩略图（文件夹列表/网格预览用）。
 ///
-/// `resize_exact` 不保持宽高比（缩略图区域本来就是方形），
-/// 调用方负责设置 `path`。
+/// JPEG 走解码器级降采样（`jpeg_decoder::scale`，因子 1/8·1/4·1/2），
+/// 只解码需要的 DCT 块，峰值内存约为全解码的 1/60；其余格式全解码后
+/// 用快速缩略算法（链式半采样）。调用方负责设置 `path`。
 pub fn decode_thumbnail_bytes(bytes: &[u8], size: u32) -> Option<DecodedImage> {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        if let Some(img) = decode_jpeg_thumb(bytes, size) {
+            return Some(img);
+        }
+    }
     let img = image::load_from_memory(bytes).ok()?;
-    let img = img.resize_exact(size, size, image::imageops::FilterType::Lanczos3);
-    let img = img.to_rgba8();
+    let img = img.thumbnail(size, size).to_rgba8();
+    let out_size = [img.width() as usize, img.height() as usize];
     Some(DecodedImage {
         rgba: img.into_raw(),
-        size: [size as usize, size as usize],
+        size: out_size,
+        path: PathBuf::new(),
+    })
+}
+
+/// JPEG 解码器级降采样：scale 到接近目标尺寸后快速缩略。
+/// 非标准 JPEG / 无法缩放时返回 `None`，由调用方回退全解码。
+fn decode_jpeg_thumb(bytes: &[u8], size: u32) -> Option<DecodedImage> {
+    let mut dec = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+    dec.set_color_transform(jpeg_decoder::ColorTransform::RGB);
+    let (w, h) = dec.scale(size as u16, size as u16).ok()?;
+    let pixels = dec.decode().ok()?;
+    let channels = match dec.info().map(|i| i.pixel_format) {
+        Some(jpeg_decoder::PixelFormat::L8) | Some(jpeg_decoder::PixelFormat::L16) => 1,
+        _ => 3,
+    };
+    let rgba: Vec<u8> = match channels {
+        1 => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+        _ => pixels
+            .chunks_exact(3)
+            .flat_map(|p| [p[0], p[1], p[2], 255])
+            .collect(),
+    };
+    if rgba.len() != w as usize * h as usize * 4 {
+        return None;
+    }
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)?;
+    let img = image::DynamicImage::ImageRgba8(img)
+        .thumbnail(size, size)
+        .to_rgba8();
+    let out_size = [img.width() as usize, img.height() as usize];
+    Some(DecodedImage {
+        rgba: img.into_raw(),
+        size: out_size,
         path: PathBuf::new(),
     })
 }
@@ -185,4 +224,89 @@ pub fn extract_exif(bytes: &[u8]) -> String {
         Some(lines.join("\n"))
     }));
     result.unwrap_or_default().unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_jpeg(w: u32, h: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([(x % 255) as u8, (y % 255) as u8, 128, 255]),
+                );
+            }
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        out.into_inner()
+    }
+
+    fn make_png(w: u32, h: u32) -> Vec<u8> {
+        let mut img = image::RgbaImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                img.put_pixel(
+                    x,
+                    y,
+                    image::Rgba([(x % 255) as u8, (y % 255) as u8, 128, 255]),
+                );
+            }
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, image::ImageFormat::Png)
+            .unwrap();
+        out.into_inner()
+    }
+
+    #[test]
+    fn jpeg_thumbnail_is_64x64() {
+        let bytes = make_jpeg(4000, 3000);
+        let thumb = decode_thumbnail_bytes(&bytes, 64).expect("jpeg thumb decode");
+        assert_eq!(thumb.size[0].max(thumb.size[1]), 64);
+        assert_eq!(thumb.rgba.len(), thumb.size[0] * thumb.size[1] * 4);
+    }
+
+    #[test]
+    fn png_thumbnail_is_64x64() {
+        let bytes = make_png(4000, 3000);
+        let thumb = decode_thumbnail_bytes(&bytes, 64).expect("png thumb decode");
+        assert_eq!(thumb.size[0].max(thumb.size[1]), 64);
+        assert_eq!(thumb.rgba.len(), thumb.size[0] * thumb.size[1] * 4);
+    }
+
+    #[test]
+    fn small_image_thumbnail_ok() {
+        let bytes = make_jpeg(100, 80);
+        let thumb = decode_thumbnail_bytes(&bytes, 64).expect("small jpeg thumb decode");
+        assert_eq!(thumb.size[0].max(thumb.size[1]), 64);
+    }
+
+    #[test]
+    fn grayscale_jpeg_thumbnail_ok() {
+        let mut img = image::GrayImage::new(2000, 1500);
+        for y in 0..1500 {
+            for x in 0..2000 {
+                img.put_pixel(x, y, image::Luma([(x % 255) as u8]));
+            }
+        }
+        let mut out = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageLuma8(img)
+            .write_to(&mut out, image::ImageFormat::Jpeg)
+            .unwrap();
+        let thumb = decode_thumbnail_bytes(&out.into_inner(), 64).expect("gray jpeg thumb decode");
+        assert_eq!(thumb.size[0].max(thumb.size[1]), 64);
+    }
+
+    #[test]
+    fn corrupt_bytes_fallback_to_none() {
+        assert!(decode_thumbnail_bytes(b"not an image at all", 64).is_none());
+    }
 }

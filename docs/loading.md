@@ -17,9 +17,10 @@
   │
   ├─ 主线程: spawn_loaders()（每批一个目标 LoadTarget）
   │     Standalone    → 全图 + EXIF + 直方图，完成后 append
-  │     Thumbnails    → 64×64 缩略图，完成后按槽位对齐写入 folder.thumbnails
+  │     Thumbnails    → 缩略图（JPEG 解码器级降采样，保持宽高比），
+  │                     每批 ≤8 张按槽位写入 folder.thumbnails
   │     OpenEntry     → 全图，完成后 open_folder_entry（文件夹 cell 隐藏）
-  │     OpenEntries   → 多张全图，逐个打开（Space 打开选中）
+  │     OpenEntries   → 多张全图（按网格名额截断），逐个打开
   │     Navigate      → 全图，完成后替换图片内容（Space/B 上一张/下一张）
   │
   ├─ 子线程 ×N（纯 CPU，无共享状态）:

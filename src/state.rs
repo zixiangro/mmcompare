@@ -154,7 +154,11 @@ impl AppState {
     }
 
     /// 把文件夹条目打开为图片 cell，同时从网格隐藏该文件夹 cell。
+    /// 网格已满时拒绝（打开后文件夹隐藏腾 1 格，但调用方已按名额截断）。
     pub fn open_folder_entry(&mut self, folder_idx: usize, entry_idx: usize, info: ImageInfo) {
+        if self.cell_order.len() >= MAX_IMAGES {
+            return;
+        }
         let img_idx = self.image_cells.len();
         self.image_cells.push(ImageCell::from_info(
             info,

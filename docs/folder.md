@@ -17,9 +17,9 @@
 拖入目录 / 命令行传目录
   → imlayout: classify_paths() 分离文件与目录（目录按 dir_path 去重）
   → scan_folders(): 子线程 read_dir → 过滤 → 排序 → poll_scan() 登记 FolderCell 入格
-  → 缩略图排队 pending_thumbnails → 加载空闲时 spawn_loaders(LoadTarget::Thumbnails)
-  → 子线程：read → decode_thumbnail_bytes(64×64) → mpsc
-  → poll_loading: 按槽位 push thumbnails（失败槽位 None，与 entries 对齐）
+  → 缩略图排队 pending_thumbnails → 加载空闲时**分批**（每次 ≤8 张）
+  → 子线程：read → 缩略图解码（JPEG 走解码器级降采样）→ mpsc
+  → poll_loading: 按槽位写入 thumbnails（失败槽位 None，与 entries 对齐）
 ```
 
 ## 交互
@@ -51,3 +51,13 @@
 - 缩略图解码失败静默跳过（槽位为 `None`），不弹横幅；
 - 目录扫描在子线程执行（`scan_folders`），主线程只登记结果；
   扫描期间拖入的新目录进入 `pending_drops`，扫描批次完成后按序处理。
+
+## 海量目录的缩略图策略
+
+- **分批限并发**：每次最多 8 张同时解码（`THUMB_BATCH`），队列按
+  (文件夹, 偏移) 推进；峰值内存 ≈ 8 × (文件字节 + 解码缓冲)，不随目录大小增长。
+- **JPEG 解码器级降采样**：`jpeg_decoder::scale` 只解码需要的 DCT 块
+  （因子 1/8·1/4·1/2），单张解码内存约为全解码的 1/60；
+  其余格式（PNG/WebP 等）全解码后用链式半采样快速缩略。
+- 缩略图**保持宽高比**（最长边 64px），列表/网格渲染按比例绘制，不变形。
+- 打开多张选中条目按剩余网格名额截断（≤ `MAX_IMAGES` 格）。
