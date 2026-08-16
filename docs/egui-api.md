@@ -22,6 +22,7 @@
 
 ## 其他
 
+- `Sense::drag()` **不含 CLICK**：click 与 drag 是分离的 bit，只有 `Sense::click_and_drag()` 两者兼有。用 `Sense::drag()` 的 widget 上 `clicked()`/`secondary_clicked()` 永远不触发；此时应直接读 `ctx.input(|i| i.pointer.button_clicked(button))`（egui 已排除拖拽判定）。
 - `MenuButton` 在 `egui::menu::` 模块，不在顶层 `egui::`
 - `MenuBar` 在顶层 `egui::`（通过 `containers::*` re-export）
 - `rect_stroke()` 多了一个 `StrokeKind` 参数（含 `Inside`/`Outside`）

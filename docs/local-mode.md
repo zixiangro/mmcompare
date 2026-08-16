@@ -1,10 +1,10 @@
 # 局部模式 (Local Mode)
 
-> 状态: 稳定 | 更新: 2026-07-31 | 关联: [architecture.md](architecture.md) · [layout.md](layout.md)
+> 状态: 稳定 | 更新: 2026-08-16 | 关联: [architecture.md](architecture.md) · [layout.md](layout.md)
 
 ## 触发
 
-按 `P` 键切换。`app.rs` 检测 `Key::P`，toggle `state.local_mode`。
+按 `P` 键切换。`ui/imlayout.rs` 检测 `Key::P`，toggle `state.local_mode`。
 
 ## 选择框交互
 
@@ -56,8 +56,7 @@ AppState {
 
 | 文件 | 职责 |
 |---|---|
-| `app.rs` | 按 P 切换模式 |
-| `viewer.rs` | 局部模式下用 `Sense::drag()`，`handle_drag()` 编排拖拽事件 |
-| `imcell.rs` | `draw_overlay()` 画框和文字，`mouse_to_norm()` 坐标转换 |
+| `ui/imlayout.rs` | 按 P 切换模式；局部模式下用 `Sense::drag()`，`handle_drag()` 编排拖拽事件 |
+| `ui/imcell.rs` | `draw_overlay()` 画框和文字，`mouse_to_norm()` 坐标转换 |
 | `state.rs` | `drag_start_new/drag_start_move/drag_update/drag_end` 状态管理 |
 | `core/image.rs` | `compute_selection_stats()` 像素采样，`format_cell_label()` 标签格式化 |

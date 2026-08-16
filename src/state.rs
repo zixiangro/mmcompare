@@ -1,11 +1,22 @@
+//! 全局状态：图片数据、显示顺序、交互状态。
+//!
+//! 设计约束（ADR-0004）：
+//! - 本模块是**纯数据结构**：只有状态与状态转移的薄方法，不含业务/渲染逻辑；
+//! - 全部字段都是普通值、没有锁——多线程只发生在 imlayout.rs 的加载管线，
+//!   线程间通过 mpsc 传自有数据，写入 state 的时机永远在主线程（ADR-0001）。
+//!
+//! 索引约定（三处必须保持一致，否则会静默画错图）：
+//! - `image_cells` 是图片的**实际存储**，删除元素时下标会移动；
+//! - `cell_order` 是**显示顺序**，元素是 `CellKind::Image(usize)`，
+//!   其中的 usize 是 `image_cells` 的下标；
+//! - `pan_offset` 与 `cell_order` 同长度、同顺序，按"格子"而非"图片"索引，
+//!   重排（swap）后平移量跟着格子走而不是跟着图片走。
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::core::image::AvgStats;
 
-/// 单幅图片可同时显示的硬上限。
-///
-/// 由布局决定（最多两行、每行 4 列），同时也是键盘旋转快捷键的数量。
 pub const MAX_IMAGES: usize = 8;
 
 pub struct ImageInfo {
@@ -13,9 +24,7 @@ pub struct ImageInfo {
     pub size: [usize; 2],
     pub rgba: Vec<u8>,
     pub path: PathBuf,
-    /// EXIF 摘要文本（空串表示无 EXIF 或解析失败），在解码线程中生成。
     pub exif: String,
-    /// Y 亮度直方图，在解码线程中生成。
     pub histogram: [u32; 256],
 }
 
@@ -37,7 +46,7 @@ impl ImageCell {
 
 #[derive(Clone, Copy)]
 pub enum CellKind {
-    Image(usize), // index into AppState.image_cells
+    Image(usize),
 }
 
 pub type NormRect = [f32; 4];
@@ -50,24 +59,19 @@ pub(crate) enum DragKind {
 
 pub struct AppState {
     pub image_cells: Vec<ImageCell>,
-    /// Display order of all cells.
     pub cell_order: Vec<CellKind>,
 
     pub local_mode: bool,
     pub show_exif: bool,
     pub show_histogram: bool,
 
-    /// Global zoom (image cells only).
     pub zoom: f32,
-    /// Global pan (left-drag, image cells only).
     pub pan: [f32; 2],
-    /// Per-cell pan offset, indexed by cell_order position.
     pub pan_offset: Vec<[f32; 2]>,
 
     pub loaded_paths: HashSet<PathBuf>,
     pub reorder_src: Option<usize>,
     pub pending_remove: Vec<usize>,
-    /// 最近一次加载失败的路径，在下一次加载开始时清空。
     pub load_errors: Vec<PathBuf>,
 
     drag_origin: Option<[f32; 2]>,
@@ -96,7 +100,6 @@ impl AppState {
         }
     }
 
-    /// Add image cells (from drag/drop or command line).
     pub fn append_standalone_images(&mut self, infos: Vec<ImageInfo>) {
         let start = self.image_cells.len();
         for (i, info) in infos.into_iter().enumerate() {
@@ -106,7 +109,6 @@ impl AppState {
         }
     }
 
-    /// Remove a cell from cell_order.
     pub fn remove_cell(&mut self, cell_order_pos: usize) {
         let Some(&CellKind::Image(img_idx)) = self.cell_order.get(cell_order_pos) else {
             return;
@@ -201,7 +203,19 @@ impl AppState {
         self.pan_offset.swap(a, b);
     }
 
-    /// Whether there is at least one cell to render.
+    pub fn invalidate_selection_after_rotation(&mut self, img_idx: usize) {
+        if self.local_mode {
+            for img in &mut self.image_cells {
+                img.selection = None;
+                img.avg_stats = None;
+            }
+        } else {
+            let cell = &mut self.image_cells[img_idx];
+            cell.selection = None;
+            cell.avg_stats = None;
+        }
+    }
+
     pub fn is_all_images(&self) -> bool {
         self.cell_order
             .iter()

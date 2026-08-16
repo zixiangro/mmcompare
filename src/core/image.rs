@@ -1,3 +1,6 @@
+//! 纯像素数据处理：解码、旋转、直方图、选区统计、标签格式化、EXIF。
+//! 零 GUI 依赖，可脱离界面单独测试。
+
 use std::path::PathBuf;
 
 pub struct DecodedImage {
@@ -5,8 +8,6 @@ pub struct DecodedImage {
     pub size: [usize; 2],
     pub path: PathBuf,
 }
-
-// ── Decode ────────────────────────────────────────────
 
 pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     let img = image::load_from_memory(bytes).ok()?;
@@ -23,8 +24,6 @@ pub fn decode_image_bytes(bytes: &[u8]) -> Option<DecodedImage> {
     })
 }
 
-// ── Rotation (pure pixel op) ──────────────────────────
-
 pub fn rotate_rgba_90_cw(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, [usize; 2]) {
     let mut out = vec![0u8; w * h * 4];
     for y in 0..h {
@@ -36,8 +35,6 @@ pub fn rotate_rgba_90_cw(rgba: &[u8], w: usize, h: usize) -> (Vec<u8>, [usize; 2
     }
     (out, [h, w])
 }
-
-// ── Y helpers ─────────────────────────────────────────
 
 const LUMA_R: f32 = 0.299;
 const LUMA_G: f32 = 0.587;
@@ -55,8 +52,6 @@ pub fn compute_y_histogram(rgba: &[u8]) -> [u32; 256] {
     }
     hist
 }
-
-// ── Selection stats ───────────────────────────────────
 
 #[derive(Clone, Copy)]
 pub struct AvgStats {
@@ -110,8 +105,6 @@ pub fn format_cell_label(s: &AvgStats) -> String {
     )
 }
 
-// ── EXIF ──────────────────────────────────────────────
-
 fn exif_f64_or_urational(v: &nom_exif::EntryValue) -> Option<f64> {
     v.as_f64().or_else(|| {
         v.as_urational()
@@ -129,7 +122,6 @@ pub fn extract_exif(bytes: &[u8]) -> String {
 
         let mut lines = Vec::new();
 
-        // Camera
         if let Some(v) = get(nom_exif::ExifTag::Make).and_then(|v| v.as_str()) {
             let model = get(nom_exif::ExifTag::Model)
                 .and_then(|v| v.as_str())
@@ -143,19 +135,16 @@ pub fn extract_exif(bytes: &[u8]) -> String {
             lines.push(v.to_string());
         }
 
-        // Lens
         if let Some(v) = get(nom_exif::ExifTag::LensModel).and_then(|v| v.as_str())
             && !v.is_empty()
         {
             lines.push(v.to_string());
         }
 
-        // Aperture
         if let Some(v) = get(nom_exif::ExifTag::FNumber).and_then(exif_f64_or_urational) {
             lines.push(format!("f/{:.1}", v));
         }
 
-        // Shutter
         if let Some(v) = get(nom_exif::ExifTag::ExposureTime).and_then(exif_f64_or_urational) {
             if v < 1.0 {
                 lines.push(format!("1/{}s", (1.0 / v).round() as u32));
@@ -164,7 +153,6 @@ pub fn extract_exif(bytes: &[u8]) -> String {
             }
         }
 
-        // ISO
         if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u32()) {
             lines.push(format!("ISO {}", v));
         } else if let Some(v) = get(nom_exif::ExifTag::ISOSpeedRatings).and_then(|v| v.as_u16()) {
@@ -173,7 +161,6 @@ pub fn extract_exif(bytes: &[u8]) -> String {
             lines.push(format!("ISO {}", v));
         }
 
-        // Flash
         if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_u16()) {
             lines.push(format!("Flash: {}", if v & 1 != 0 { "On" } else { "Off" }));
         } else if let Some(v) = get(nom_exif::ExifTag::Flash).and_then(|v| v.as_str()) {

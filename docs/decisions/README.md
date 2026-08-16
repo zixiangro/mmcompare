@@ -1,6 +1,6 @@
 # 架构决策记录（ADR）
 
-> 状态: 稳定 | 更新: 2026-07-31
+> 状态: 稳定 | 更新: 2026-08-16
 
 ## 什么是 ADR
 
@@ -11,10 +11,11 @@ ADR（Architecture Decision Record）把"为什么代码长这样"写下来。�
 
 | 编号 | 决策 | 状态 |
 |---|---|---|
-| [0001](0001-single-threaded-model.md) | 单线程心智模型，多线程物理隔离在 app.rs | 已接受 |
+| [0001](0001-single-threaded-model.md) | 单线程心智模型，多线程物理隔离在 ui/imlayout.rs | 已接受 |
 | [0002](0002-manual-layout.md) | 手动精确坐标布局，不用 egui 自动布局 | 已接受 |
 | [0003](0003-loading-pipeline.md) | 解码管线：子线程纯 CPU 计算 + 主线程纹理上传 | 已接受 |
-| [0004](0004-module-separation.md) | 前后端分层 + 布局/渲染解耦 | 已接受 |
+| [0004](0004-module-separation.md) | 前后端分层 + 布局/渲染解耦 | 已接受（ui 划分被 0005 取代） |
+| [0005](0005-merge-orchestration-into-imlayout.md) | 合并编排层与布局引擎为 imlayout（统筹所有 imcell） | 已接受 |
 
 ## 模板
 

@@ -8,14 +8,14 @@
 
 ## 决策
 
-`viewer.rs` 采用**完全手动坐标**：
+`ui/imlayout.rs` 的布局部分采用**完全手动坐标**：
 
 1. `ui.allocate_exact_size` 一次性预留整个网格区域；
 2. 用 `pos2`/`Rect::from_min_size` 手工计算每个 cell、分隔线、margin 区的位置；
 3. 用 `ui.painter()` 绘制，用 `ui.allocate_rect` / `ui.allocate_exact_size` 声明交互区；
 4. 不在布局路径上使用任何自动布局 API。
 
-配套的渲染分工见 ADR-0004（viewer 只算位置，imcell 只负责画）。
+配套的渲染分工见 ADR-0004/0005（imlayout 统筹布局，imcell 只负责画）。
 
 ## 后果
 

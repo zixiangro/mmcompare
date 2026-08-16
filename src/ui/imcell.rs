@@ -1,6 +1,41 @@
+//! 单格渲染单元：给定"图片 + 矩形"，把一张图画好。
+//!
+//! 不关心自己在哪、不关心有几个格子、不碰业务状态——需要改 state 的
+//! 操作（旋转、纹理重建）只返回数据，由 imlayout（统筹层）写回。
+
 use eframe::egui;
 
+use crate::core;
 use crate::state::{ImageInfo, NormRect};
+
+pub fn upload_texture(
+    ctx: &egui::Context,
+    rgba: &[u8],
+    size: [usize; 2],
+    name: &str,
+) -> egui::TextureHandle {
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba);
+    ctx.load_texture(name, color_image, egui::TextureOptions::default())
+}
+
+pub fn rotate_image(info: &ImageInfo, ctx: &egui::Context) -> ImageInfo {
+    let (rgba, size) = core::image::rotate_rgba_90_cw(&info.rgba, info.size[0], info.size[1]);
+    let histogram = core::image::compute_y_histogram(&rgba);
+    let name = info
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("image");
+    let texture = upload_texture(ctx, &rgba, size, name);
+    ImageInfo {
+        texture,
+        size,
+        rgba,
+        path: info.path.clone(),
+        exif: info.exif.clone(),
+        histogram,
+    }
+}
 
 pub fn draw_image(ui: &mut egui::Ui, img: &ImageInfo, rect: egui::Rect, zoom: f32, pan: [f32; 2]) {
     let img_rect = image_display_rect(rect, img.size, zoom, pan);
@@ -38,7 +73,6 @@ pub fn image_display_rect(
     egui::Rect::from_min_size(cell_rect.min + egui::vec2(ox, oy), egui::vec2(dw, dh))
 }
 
-/// Clamp raw pan to the effective value that image_display_rect would produce.
 pub fn clamp_pan(
     raw: [f32; 2],
     cell_rect: egui::Rect,
@@ -84,7 +118,7 @@ pub fn mouse_to_norm(
     ])
 }
 
-#[allow(clippy::too_many_arguments)] // 纯绘制函数，扁平参数便于调用方直接传 state 字段
+#[allow(clippy::too_many_arguments)]
 pub fn draw_overlay(
     ui: &mut egui::Ui,
     cell_rect: egui::Rect,

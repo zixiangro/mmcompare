@@ -1,14 +1,16 @@
 # 布局引擎
 
-> 状态: 稳定 | 更新: 2026-07-31 | 关联: [ADR-0002](decisions/0002-manual-layout.md) · [ADR-0004](decisions/0004-module-separation.md)
+> 状态: 稳定 | 更新: 2026-08-16 | 关联: [ADR-0002](decisions/0002-manual-layout.md) · [ADR-0005](decisions/0005-merge-orchestration-into-imlayout.md)
 
 ## 概述
 
-`viewer.rs` 是纯布局引擎，不包含任何图片绘制代码。它负责：
+`ui/imlayout.rs` 的布局部分是统筹层的一部分（ADR-0005 合并了原 viewer.rs）：
 1. 根据图片数量决定行列数
 2. 计算统一的 cell 尺寸
 3. 摆放分隔线和 margin
 4. 委托 `imcell.rs` 渲染每个格子的内容
+
+它只算位置、编排交互，不关心单张图片怎么画——那是 `imcell` 的事。
 
 ## 常量
 

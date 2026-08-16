@@ -1,10 +1,10 @@
 # 图片加载管线
 
-> 状态: 稳定 | 更新: 2026-07-31 | 关联: [ADR-0001](decisions/0001-single-threaded-model.md) · [ADR-0003](decisions/0003-loading-pipeline.md)
+> 状态: 稳定 | 更新: 2026-08-16 | 关联: [ADR-0001](decisions/0001-single-threaded-model.md) · [ADR-0003](decisions/0003-loading-pipeline.md)
 
 ## 原则
 
-单线程心智模型为主（ADR-0001）。多线程代码**完全隔离**在 `app.rs` 中，仅用于图片加载。无 `Arc<Mutex<>>`，无全局线程池。
+单线程心智模型为主（ADR-0001）。多线程代码**完全隔离**在 `ui/imlayout.rs` 中，仅用于图片加载。无 `Arc<Mutex<>>`，无全局线程池。
 
 ## 管线总览
 

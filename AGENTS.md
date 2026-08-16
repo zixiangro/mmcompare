@@ -31,7 +31,8 @@ docs/
     ├── 0001-single-threaded-model.md   # 单线程心智模型
     ├── 0002-manual-layout.md           # 手动坐标布局
     ├── 0003-loading-pipeline.md        # 加载管线分工
-    └── 0004-module-separation.md       # 模块边界
+    ├── 0004-module-separation.md       # 模块边界
+    └── 0005-merge-orchestration-into-imlayout.md  # 编排层与布局引擎合并为 imlayout
 ```
 
 ## 3. 工程规范
@@ -42,27 +43,30 @@ docs/
 core/   纯数据处理，零 GUI 依赖（解码、旋转、直方图、统计、标签、EXIF）
 state.rs 纯数据结构，只有状态与状态转移薄方法
 ui/     只读 state 渲染；交互结果写入 state，不直接改业务状态
-app.rs  薄编排层：加载管线、键盘事件、标题（唯一允许线程原语的模块）
+        ├── imlayout.rs  统筹所有 imcell：加载管线、键盘事件、标题、网格布局、交互编排
+        │                （唯一允许线程原语的模块）
+        └── imcell.rs    单格渲染单元：给定"图片 + 矩形"，画好一张图，不关心自己在哪
 ```
 
 ### 3.2 线程模型（ADR-0001）
 
-- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `app.rs` 的 `spawn_loaders`/`poll_loading`/`poll_drops`/`drain_pending_drops`。
+- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `imlayout.rs` 的 `spawn_loaders`/`poll_loading`/`poll_drops`/`drain_pending_drops`。
 - 子线程用完即弃，线程间仅 `mpsc::channel`。**禁止 `Arc<Mutex<>>`、`RwLock`、线程池**。
 - 重 CPU 计算（解码、EXIF、直方图）必须放子线程；主线程只做纹理上传（ADR-0003）。
 
 ### 3.3 布局与渲染解耦（ADR-0002/0004）
 
-- `viewer.rs` 布局引擎：只算 cell 位置、画分隔线、编排交互。不关心图片怎么画。
-- `imcell.rs` 渲染单元：只做"图片 + 矩形 → 居中画出来"。不关心自己在哪。
+- `imlayout.rs` 统筹层：只算 cell 位置、画分隔线、编排交互、跑加载管线。不关心单张图片怎么画。
+- `imcell.rs` 单格渲染单元：图片 → 屏幕的一切（居中绘制、纹理重建、旋转封装、覆盖层）。不关心自己在哪、不碰 state。
+- 像素算法（旋转/直方图/统计）在 `core`；`imcell` 封装"图片操作"但不碰 state（返回值由 `imlayout` 写回）；选区失效等状态转移归 `state.rs`。
 - 完全手动坐标（`allocate_exact_size` → `pos2` → `painter`/`allocate_rect`），不用自动布局。
 
 ### 3.4 代码风格
 
-- 模块/函数/变量：蛇形命名；常量：`SCREAMING_SNAKE`；公共项带 doc comment。
-- 注释用中文，只解释"为什么"（意图、约束、权衡），不解释"是什么"。
-- 交互状态变更集中在帧末统一应用（参考 `viewer.rs` 的 `PanFeedback` 模式），避免渲染中途改状态。
-- clippy 0 警告、`cargo fmt` 通过是提交前提。纯绘制函数参数超限用 `#[allow(clippy::too_many_arguments)]` 并注明理由，不强行拆结构。
+- 模块/函数/变量：蛇形命名；常量：`SCREAMING_SNAKE`；公共项不带 doc comment。
+- **注释只保留文件头部的模块说明（`//!`）**：代码内不写行内/函数注释；需要解释的"为什么"（意图、约束、权衡）一律写进 docs/（或文件头部），避免注释与代码双份维护。
+- 交互状态变更集中在帧末统一应用（参考 `imlayout.rs` 的 `PanFeedback` 模式），避免渲染中途改状态。
+- clippy 0 警告、`cargo fmt` 通过是提交前提。纯绘制函数参数超限用 `#[allow(clippy::too_many_arguments)]`，不强行拆结构。
 
 ### 3.5 错误处理
 
@@ -81,8 +85,8 @@ app.rs  薄编排层：加载管线、键盘事件、标题（唯一允许线程
 | 常量 | 值 | 说明 |
 |---|---|---|
 | `MAX_IMAGES` (state.rs) | 8 | 图片硬上限，同时决定数字键旋转数量 |
-| `SEP` (viewer.rs) | 1.0 | 分隔线粗细 |
-| `MARGIN` (viewer.rs) | 6.0 | 竖线两侧间距 & 窗口边缘留白 |
+| `SEP` (imlayout.rs) | 1.0 | 分隔线粗细 |
+| `MARGIN` (imlayout.rs) | 6.0 | 竖线两侧间距 & 窗口边缘留白 |
 
 ## 4. 开发工作流
 
@@ -108,7 +112,8 @@ app.rs  薄编排层：加载管线、键盘事件、标题（唯一允许线程
 | 滚轮 | 全局缩放（图片模式下） |
 | 左键拖拽 | 缩放 >1 时全局平移；局部模式下为框选 |
 | 右键拖拽 | 单 cell 平移 |
-| `Ctrl` | 显示删除按钮 + 拖拽重排 |
+| `Ctrl` + 右键 | 删除当前图片 |
+| `Ctrl` + 左键拖拽 | 重排 |
 
 ## 6. 布局规则
 
