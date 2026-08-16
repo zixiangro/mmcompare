@@ -16,7 +16,7 @@
 ```
 拖入目录 / 命令行传目录
   → imlayout: classify_paths() 分离文件与目录（目录按 dir_path 去重）
-  → add_folder_cell(): read_dir 扫描 → 按文件名排序 → 登记 FolderCell + 入 cell_order
+  → scan_folders(): 子线程 read_dir → 过滤 → 排序 → poll_scan() 登记 FolderCell 入格
   → 缩略图排队 pending_thumbnails → 加载空闲时 spawn_loaders(LoadTarget::Thumbnails)
   → 子线程：read → decode_thumbnail_bytes(64×64) → mpsc
   → poll_loading: 按槽位 push thumbnails（失败槽位 None，与 entries 对齐）
@@ -47,7 +47,7 @@
 
 ## 已知限制
 
-- 从文件夹打开的图片**不可旋转**（数字键 1-8 只作用于独立拖入的图片）；
 - 删除文件夹 cell 时，其已打开的图片降级为独立图片（失去导航，图片保留）；
 - 缩略图解码失败静默跳过（槽位为 `None`），不弹横幅；
-- `read_dir` 扫描在主线程执行，超大目录会有一次性卡顿。
+- 目录扫描在子线程执行（`scan_folders`），主线程只登记结果；
+  扫描期间拖入的新目录进入 `pending_drops`，扫描批次完成后按序处理。

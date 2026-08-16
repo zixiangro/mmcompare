@@ -53,7 +53,7 @@ ui/     只读 state 渲染；交互结果写入 state，不直接改业务状�
 
 ### 3.2 线程模型（ADR-0001）
 
-- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `imlayout.rs` 的 `spawn_loaders`/`poll_loading`/`poll_drops`/`drain_pending_drops`。
+- 除图片加载外全部在主线程运行；多线程代码**物理隔离**在 `imlayout.rs` 的 `spawn_loaders`/`poll_loading`/`poll_drops`/`drain_pending_drops`/`scan_folders`/`poll_scan`。
 - 子线程用完即弃，线程间仅 `mpsc::channel`。**禁止 `Arc<Mutex<>>`、`RwLock`、线程池**。
 - 重 CPU 计算（解码、EXIF、直方图）必须放子线程；主线程只做纹理上传（ADR-0003）。
 
@@ -110,7 +110,7 @@ ui/     只读 state 渲染；交互结果写入 state，不直接改业务状�
 |---|---|
 | `P` | 局部模式：拖拽框选（归一化同步所有 cell）；右键移动选择框 |
 | `E` / `H` | 切换 EXIF 摘要 / 直方图显示 |
-| `1-8` | 旋转对应位置图片（顺时针 90°，仅独立拖入的图片） |
+| `1-8` | 旋转对应位置图片（顺时针 90°；导航到下一张后重置为原始方向） |
 | `Q` | 按住：两张图时互换显示（对比） |
 | `Space` / `B` | 文件夹打开的图片：上一张 / 下一张 |
 | `Esc` | 关闭文件夹打开的图片，恢复文件夹视图 |

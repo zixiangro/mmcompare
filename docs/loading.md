@@ -11,9 +11,9 @@
 ```
 拖拽 / 命令行传参（文件或目录）
   │
-  ├─ 主线程: classify_paths()
-  │     分离文件与目录 → 对 loaded_paths / folder_cells 去重 → 排序 → 截断名额
-  │     （文件立即标记 loaded_paths，防止同批重复入队）
+  ├─ 目录: scan_folders()（子线程 read_dir + 过滤 + 排序）
+  │     → poll_scan() 收齐 → register_folder_cell() 入格
+  │     → 缩略图排队 pending_thumbnails（等加载空闲）
   │
   ├─ 主线程: spawn_loaders()（每批一个目标 LoadTarget）
   │     Standalone    → 全图 + EXIF + 直方图，完成后 append
@@ -34,6 +34,7 @@
 
 加载期间新到的拖拽进入 `pending_drops`，待缩略图目录进入 `pending_thumbnails`，
 当前批次完成后由 `drain_pending_drops` / `drain_pending_thumbnails` 按序启动。
+目录扫描与图片解码是两个独立批次（`scan_rx` / `load_rx`），可并行。
 
 ## 关键类型
 

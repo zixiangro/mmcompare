@@ -53,6 +53,9 @@ enum LoadTarget {
     Navigate(usize, usize, usize),
 }
 
+/// 目录扫描批次：路径 + 条目列表（失败为 `None`，不登记）。
+type ScanResult = Option<(PathBuf, Vec<PathBuf>)>;
+
 pub struct MmCompare {
     state: AppState,
     load_rx: Option<mpsc::Receiver<(usize, LoadResult)>>,
@@ -60,6 +63,10 @@ pub struct MmCompare {
     loading_received: usize,
     loading_buf: Vec<Option<ImageInfo>>,
     load_target: Option<LoadTarget>,
+    scan_rx: Option<mpsc::Receiver<(usize, ScanResult)>>,
+    scan_total: usize,
+    scan_received: usize,
+    scan_buf: Vec<ScanResult>,
     pending_drops: Vec<PathBuf>,
     pending_thumbnails: Vec<usize>,
 }
@@ -73,6 +80,10 @@ impl Default for MmCompare {
             loading_received: 0,
             loading_buf: Vec::new(),
             load_target: None,
+            scan_rx: None,
+            scan_total: 0,
+            scan_received: 0,
+            scan_buf: Vec::new(),
             pending_drops: Vec::new(),
             pending_thumbnails: Vec::new(),
         }
@@ -99,6 +110,10 @@ fn sort_paths(paths: &mut [PathBuf]) {
 impl MmCompare {
     fn is_loading(&self) -> bool {
         self.load_rx.is_some()
+    }
+
+    fn is_scanning(&self) -> bool {
+        self.scan_rx.is_some()
     }
 
     /// 把输入路径分类为图片文件与文件夹（去重、排序、标记、截断名额），
@@ -130,8 +145,8 @@ impl MmCompare {
         if !file_paths.is_empty() {
             self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
         }
-        for dir in folder_paths {
-            self.add_folder_cell(dir);
+        if !folder_paths.is_empty() {
+            self.scan_folders(folder_paths);
         }
     }
 
@@ -146,23 +161,23 @@ impl MmCompare {
         if file_paths.is_empty() && folder_paths.is_empty() {
             return;
         }
-        if self.is_loading() {
+        if self.is_loading() || self.is_scanning() {
             self.pending_drops.extend(file_paths);
             self.pending_drops.extend(folder_paths);
         } else {
             if !file_paths.is_empty() {
                 self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
             }
-            for dir in folder_paths {
-                self.add_folder_cell(dir);
+            if !folder_paths.is_empty() {
+                self.scan_folders(folder_paths);
             }
         }
     }
 
-    /// 加载完成后，把缓存中的拖拽路径启动为新一批加载（重新分类：
+    /// 加载完成后，把缓存中的拖拽路径启动为新一批（重新分类：
     /// 缓存期间格子可能已被删除/加满，名额变了）。
     fn drain_pending_drops(&mut self, ctx: &egui::Context) {
-        if self.is_loading() || self.pending_drops.is_empty() {
+        if self.is_loading() || self.is_scanning() || self.pending_drops.is_empty() {
             return;
         }
         let paths = std::mem::take(&mut self.pending_drops);
@@ -170,22 +185,65 @@ impl MmCompare {
         if !file_paths.is_empty() {
             self.spawn_loaders(file_paths, ctx, LoadTarget::Standalone);
         }
-        for dir in folder_paths {
-            self.add_folder_cell(dir);
+        if !folder_paths.is_empty() {
+            self.scan_folders(folder_paths);
         }
     }
 
-    /// 扫描目录并登记一个文件夹 cell；缩略图加载排队到 `pending_thumbnails`。
-    fn add_folder_cell(&mut self, dir: PathBuf) {
-        let mut entries: Vec<PathBuf> = match std::fs::read_dir(&dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| is_image_ext(p))
-                .collect(),
-            Err(_) => return,
+    /// 启动一批目录扫描（子线程 read_dir + 过滤 + 排序），
+    /// 结果由 `poll_scan` 收齐后登记为文件夹 cell。
+    fn scan_folders(&mut self, dirs: Vec<PathBuf>) {
+        self.scan_total = dirs.len();
+        self.scan_received = 0;
+        self.scan_buf = (0..dirs.len()).map(|_| None).collect();
+        let (tx, rx) = mpsc::channel();
+        for (i, dir) in dirs.into_iter().enumerate() {
+            let tx = tx.clone();
+            std::thread::spawn(move || {
+                let entries: ScanResult = std::fs::read_dir(&dir).ok().map(|rd| {
+                    let mut v: Vec<PathBuf> = rd
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path())
+                        .filter(|p| is_image_ext(p))
+                        .collect();
+                    sort_paths(&mut v);
+                    (dir.clone(), v)
+                });
+                tx.send((i, entries)).ok();
+            });
+        }
+        drop(tx);
+        self.scan_rx = Some(rx);
+    }
+
+    /// 每帧收齐扫描结果，逐个登记文件夹 cell；缩略图加载排队。
+    fn poll_scan(&mut self) {
+        let Some(rx) = &self.scan_rx else {
+            return;
         };
-        sort_paths(&mut entries);
+        while let Ok((i, entries)) = rx.try_recv() {
+            self.scan_buf[i] = entries;
+            self.scan_received += 1;
+        }
+        if self.scan_received < self.scan_total {
+            return;
+        }
+        let dirs = std::mem::take(&mut self.scan_buf);
+        for scan in dirs {
+            if let Some((dir, entries)) = scan {
+                self.register_folder_cell(dir, entries);
+            }
+        }
+        self.scan_rx = None;
+        self.scan_total = 0;
+        self.scan_received = 0;
+    }
+
+    /// 登记一个已扫描完成的文件夹 cell（网格满时跳过）。
+    fn register_folder_cell(&mut self, dir: PathBuf, entries: Vec<PathBuf>) {
+        if self.state.cell_order.len() >= MAX_IMAGES {
+            return;
+        }
         let idx = self.state.folder_cells.len();
         self.state.folder_cells.push(FolderCell {
             dir_path: dir,
@@ -511,10 +569,6 @@ impl eframe::App for MmCompare {
             for idx in nums {
                 if idx < self.state.cell_order.len()
                     && let CellKind::Image(img_idx) = self.state.cell_order[idx]
-                    && matches!(
-                        self.state.image_cells[img_idx].source,
-                        ImageSource::Standalone
-                    )
                 {
                     self.rotate_image_cell(img_idx, ui.ctx());
                 }
@@ -597,6 +651,7 @@ impl eframe::App for MmCompare {
 
         self.poll_drops(ui.ctx());
         self.poll_loading(ui.ctx());
+        self.poll_scan();
         self.drain_pending_drops(ui.ctx());
         self.drain_pending_thumbnails(ui.ctx());
 
