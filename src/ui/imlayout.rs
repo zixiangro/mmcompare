@@ -707,13 +707,29 @@ fn render_image_cell(
         .as_ref()
         .map(core::image::format_cell_label)
         .unwrap_or_default();
+    // EXIF 摘要第一行显示图片名称，其余照旧（数据层不变，仅展示时拼接）
+    let exif_display = if state.show_exif {
+        let name = cell
+            .info
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("image");
+        if cell.info.exif.is_empty() {
+            name.to_string()
+        } else {
+            format!("{name}\n{}", cell.info.exif)
+        }
+    } else {
+        String::new()
+    };
     imcell::draw_overlay(
         ui,
         cell_rect,
         &cell.info,
         cell.selection,
         &label,
-        if state.show_exif { &cell.info.exif } else { "" },
+        &exif_display,
         if state.show_histogram {
             &cell.info.histogram
         } else {
