@@ -2,19 +2,23 @@
 
 > 状态: 稳定 | 更新: 2026-08-16
 
-本目录是 mmcompare 的唯一文档入口。**AGENTS.md 是工程手册（给开发者和 AI 协作代理看的入口），本文件是技术文档的索引。** 原则：单一事实来源（Single Source of Truth）——同一份知识只在一处详细描述，其余位置用链接引用。
+本目录是 mmcompare 的技术文档入口。**文档按读者分层**：用户看
+[README.md](../README.md)，产品看 [product.md](product.md)，研发/新读者看
+[architecture.md](architecture.md)，工程规范在 [AGENTS.md](../AGENTS.md)。
+原则：单一事实来源——同一份知识只在一处详细描述，其余位置用链接引用。
 
 ## 文档矩阵
 
-| 文档 | 状态 | 内容 | 变更触发点 |
-|---|---|---|---|
-| [architecture.md](architecture.md) | 稳定 | 分层、数据流、模块职责 | 新增/删除模块、跨层调用关系变化 |
-| [loading.md](loading.md) | 稳定 | 图片加载管线：线程模型、通信、失败处理 | 加载流程、线程模型、载荷类型变化 |
-| [layout.md](layout.md) | 稳定 | 网格布局算法、坐标计算、常量 | 布局规则、常量（SEP/MARGIN）变化 |
-| [folder.md](folder.md) | 稳定 | 文件夹 cell：扫描、缩略图、打开/导航 | 文件夹交互、加载目标变化 |
-| [local-mode.md](local-mode.md) | 稳定 | 局部模式、归一化坐标、亮度计算 | 选择框交互、统计公式变化 |
-| [egui-api.md](egui-api.md) | 参考 | egui 0.35 与旧版 API 差异备忘 | egui 版本升级、踩到新的 API 坑 |
-| [decisions/](decisions/README.md) | 稳定 | 架构决策记录（ADR） | 新架构决策；既有决策被推翻时更新对应 ADR |
+| 文档 | 状态 | 读者 | 内容 | 变更触发点 |
+|---|---|---|---|---|
+| [architecture.md](architecture.md) | 稳定 | 研发/新读者 | 架构、代码地图、核心概念、不变量 | 模块增减、跨层调用关系变化 |
+| [product.md](product.md) | 稳定 | 产品 | 开发状态、待办、路线图 | 功能发布、路线图变化 |
+| [loading.md](loading.md) | 稳定 | 研发 | 加载管线：线程模型、通信、失败处理 | 加载流程、线程模型、载荷类型变化 |
+| [layout.md](layout.md) | 稳定 | 研发 | 网格布局算法、坐标计算、常量 | 布局规则、常量（SEP/MARGIN）变化 |
+| [folder.md](folder.md) | 稳定 | 研发 | 文件夹 cell：扫描、缩略图、打开/导航 | 文件夹交互、加载调度变化 |
+| [local-mode.md](local-mode.md) | 稳定 | 研发 | 局部模式、归一化坐标、亮度计算 | 选择框交互、统计公式变化 |
+| [egui-api.md](egui-api.md) | 参考 | 研发 | egui 0.35 与旧版 API 差异备忘 | egui 版本升级、踩到新的 API 坑 |
+| [decisions/](decisions/README.md) | 稳定 | 研发 | 架构决策记录（ADR） | 新架构决策；既有决策被推翻时更新对应 ADR |
 
 ## 文档维护规则
 

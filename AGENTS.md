@@ -1,28 +1,38 @@
 # AGENTS.md — mmcompare
 
-> 工程手册：本文件是仓库入口，包含项目速览、工程规范与文档导航。
+> 工程手册（给开发者和 AI 协作代理）：仓库入口，包含项目速览、工程规范与文档导航。
 > 详细技术内容一律在 [docs/README.md](docs/README.md)（文档地图），本文件不重复展开。
 
 ## 1. 项目概览
 
-图片对比桌面应用（egui/eframe）：多图查看（1-8 张）、选择框同步亮度对比、缩放/平移、EXIF 摘要、直方图、旋转、重排、删除、双图对比。
+图片对比桌面应用（egui/eframe）：多图查看（1-8 张）、选择框同步亮度对比、缩放/平移、EXIF 摘要、直方图、旋转、重排、删除、双文件夹对比、视频对比（规划中）。
 
 | 领域 | 选型 |
 |---|---|
 | GUI | eframe 0.35 (wgpu) + egui 0.35 |
-| 图片解码 | `image` 0.25 |
+| 图片解码 | `image` 0.25 + `jpeg-decoder`（缩略图降采样） |
 | EXIF | nom-exif 3.6 |
 | 日志 | env_logger + log |
 | 线程 | 仅 `std::thread::spawn` + `std::sync::mpsc` |
 
 ## 2. 文档导航
 
-**入口：[docs/README.md](docs/README.md)**（文档矩阵 + 维护规则）。结构：
+**文档按读者分层**：
+
+| 文档 | 读者 | 内容 |
+|---|---|---|
+| [README.md](README.md) | **用户** | 功能一览、使用说明、快捷键、FAQ |
+| [docs/product.md](docs/product.md) | **产品** | 开发状态、待办、路线图（视频对比） |
+| [docs/architecture.md](docs/architecture.md) | **研发/新读者** | 架构设计、代码地图、核心概念、不变量 |
+| 本文件 + [docs/README.md](docs/README.md) | **agent/开发者** | 工程规范、文档矩阵、变更触发点 |
+
+结构：
 
 ```
 docs/
-├── README.md          # 文档地图：索引 + 状态矩阵 + 变更触发点
-├── architecture.md    # 系统架构：分层、数据流、模块职责
+├── README.md          # 文档地图：索引 + 变更触发点
+├── product.md         # 产品文档：开发状态、待办、路线图
+├── architecture.md    # 研发文档：架构、代码地图、核心概念
 ├── loading.md         # 图片加载管线（线程模型、失败处理）
 ├── layout.md          # 布局引擎：网格算法、坐标计算
 ├── folder.md          # 文件夹 cell：扫描、缩略图、打开/导航

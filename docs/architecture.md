@@ -1,111 +1,124 @@
-# 系统架构
+# 研发文档：架构设计与思路
 
-> 状态: 稳定 | 更新: 2026-08-16 | 关联: [ADR-0004](decisions/0004-module-separation.md) · [ADR-0005](decisions/0005-merge-orchestration-into-imlayout.md)
+> 面向研发与需要理解代码结构的新读者。状态：2026-08-16
 
-## 分层
+## 一句话概览
 
-```
-┌────────────┐     ┌──────────────┐
-│   main.rs  │     │   state.rs   │
-│  入口初始化  │     │  全局共享数据  │
-└─────┬──────┘     └──────┬───────┘
-      │                   │
-┌─────▼───────────────────▼─────────┐
-│        ui/imlayout.rs             │
-│  统筹层：图片加载、键盘、布局编排  │
-│                                  │
-│  classify_paths()  分离文件/目录  │
-│  spawn_loaders()   图片解码线程   │
-│  poll_loading()    收结果+追加    │
-│  poll_drops()      拖拽/文件夹    │
-│  image_grid()      布局+交互编排   │
-│  folder: FolderManager 编排调用   │
-└────┬──────────────────────┬──────┘
-     │                      │
-┌────▼──────┐      ┌────────▼───────┐
-│   core/   │      │     ui/        │
-│  纯数据处理 │      │                │
-│           │      │ folder.rs      │
-│ image.rs  │      │ 扫描/缩略图/    │
-│  解码/缩略图│      │ 打开/导航/渲染  │
-│  旋转/直方图│      │                │
-│  统计/标签│      │ imcell.rs      │
-│  EXIF     │      │ 图片 cell 渲染  │
-└───────────┘      └────────────────┘
-```
-
-## 模块职责
-
-| 模块 | 职责 | 依赖 | 约束 |
-|---|---|---|---|
-| `main.rs` | 初始化 eframe，创建 MmCompare | eframe, ui | 不写业务逻辑 |
-| `ui/imlayout.rs` | 统筹层：图片加载管线、键盘、标题、网格布局、交互编排；持有 FolderManager 做文件夹编排 | core, state, imcell, folder | 线程代码物理隔离在加载方法组内（ADR-0001） |
-| `ui/folder.rs` | 文件夹 cell：扫描/缩略图/打开/导航/渲染（FolderManager + render_folder_cell） | core, state, imcell | 线程代码物理隔离在加载/扫描方法组内（ADR-0001/0006）；渲染不碰全局业务状态 |
-| `state.rs` | 数据结构 + 状态转移薄方法（含 FolderCell / ImageSource） | egui | 无逻辑，仅状态操作 |
-| `core/image.rs` | 纯函数：解码、缩略图、旋转、直方图、RGB 统计、标签格式化、EXIF | image, nom-exif, jpeg-decoder | 禁止任何 GUI 类型；可脱离 GUI 单测 |
-| `ui/imcell.rs` | 图片 cell 渲染：居中绘制、覆盖层、纹理重建、旋转封装 | egui, state, core | 只画/只算，不碰业务状态（返回结果由 imlayout 应用） |
-
-## 数据流
-
-### 图片加载
+一个 egui 单窗口应用：**状态（state）与渲染（ui）分离，一切重计算在后台线程，
+主线程只做状态转移与纹理上传**。所有内容都是"格子"（cell）——图片 cell、文件夹 cell——由统一的网格布局编排。
 
 ```
-用户拖拽文件
-  → imlayout: poll_drops() 取 dropped_files
-  → classify_paths() 分离文件/目录 → spawn_loaders(Standalone)
-  → 子线程：读文件 → decode → EXIF → 直方图 → mpsc
-  → 主线程：逐张上传 GPU → 收齐 append → 显示
+┌─────────────┐    ┌──────────────────────────┐
+│   main.rs   │    │        state.rs           │
+│  入口/初始化  │───▶│   纯数据：cells、模式、   │
+└─────────────┘    │   视图状态、索引约定       │
+                   └────────────┬─────────────┘
+                                │ 只读 / 薄方法转移
+                   ┌────────────▼─────────────┐
+                   │      ui/ 层（编排+渲染）    │
+                   │                          │
+                   │ imlayout.rs  统筹：布局、  │
+                   │   键盘、图片加载管线、模式  │
+                   │ folder.rs    文件夹子系统：│
+                   │   扫描/缩略图/打开/导航/渲染 │
+                   │ imcell.rs    图片 cell 绘制│
+                   └────────────┬─────────────┘
+                                │ 纯函数调用
+                   ┌────────────▼─────────────┐
+                   │      core/image.rs       │
+                   │  解码/缩略图/旋转/直方图/   │
+                   │  统计/EXIF（零 GUI 依赖）  │
+                   └──────────────────────────┘
 ```
 
-详见 [loading.md](loading.md)（管线、载荷类型、失败处理）。
+## 代码地图（阅读顺序）
 
-### 文件夹 cell
-
-```
-用户拖入目录
-  → folder.rs: scan_folders() 子线程扫描 → poll_scan() 登记 FolderCell 入格
-  → 缩略图批次排队（每批 ≤8 张）→ 列表/缩略图渲染（render_folder_cell）
-  → 双击条目 → open_entry() 异步加载 → open_folder_entry()
-  → 图片入格、文件夹 cell 隐藏；对比对（≥2 个文件夹图片）Space/B 同步索引、Esc 恢复
-```
-
-详见 [folder.md](folder.md)。
-
-### 局部模式
-
-```
-用户按 P 键
-  → imlayout: toggle state.local_mode
-  → image_grid: 切换 cell Sense::drag()
-  → 拖拽 → imcell::mouse_to_norm() 归一化 → state.selection
-  → 松手 → core::compute_selection_stats() 每图 RGB 均值
-  → core::format_cell_label() 生成标签文本 → imcell::draw_overlay() 展示
-```
-
-详见 [local-mode.md](local-mode.md)。
-
-### 渲染
-
-```
-imlayout 计算 GridLayout（行列/尺寸/分隔线）
-  → 逐 cell: render_image_cell() 编排交互（缩放/平移/重排/选择）
-  → imcell::draw_image() 居中绘制 → imcell::draw_overlay() 覆盖层
-  → 帧末: PanFeedback 统一应用到 state.pan / pan_offset
-```
-
-详见 [layout.md](layout.md)。
-
-## 架构原则速查
-
-| 原则 | 位置 | 理由 |
+| 文件 | 职责 | 阅读要点 |
 |---|---|---|
-| 单线程心智模型 | ADR-0001 | egui 状态必须主线程；无锁无竞态 |
-| 手动精确坐标 | ADR-0002 | 自动布局无法满足像素级对齐 |
-| 加载管线分工 | ADR-0003 | 重 CPU 计算下沉子线程，纹理上传留主线程 |
-| 模块边界 | ADR-0004/0005 | core 可单测、imcell 单格职责单一、imlayout 统筹所有 imcell |
+| `src/main.rs` | 入口：env_logger、命令行参数、窗口创建、主题 | 只做初始化，无业务逻辑 |
+| `src/state.rs` | **全局状态**：`image_cells`/`folder_cells`（实际存储）、`cell_order`（显示顺序）、视图开关、拖拽/删除的瞬时状态 | 文件头部的**索引约定**必须先读；所有跨帧引用（加载批次、队列）都可能受"删除导致下标移动"影响 |
+| `src/ui/imlayout.rs` | 应用主体 `MmCompare`：键盘事件、standalone 图片加载管线、网格布局 `image_grid`、交互编排（拖拽/重排/删除/缩放） | `ui()` 每帧顺序是刻意的：**键盘 → 管线轮询 → 渲染** |
+| `src/ui/folder.rs` | 文件夹子系统 `FolderManager`：目录扫描、缩略图分批调度、打开/导航加载管线、`FolderAction` 处理、文件夹 cell 渲染 | 三条独立管线（`scan_rx`/`thumb_rx`/`load_rx`）；调度策略：新目录插队、轮转、`THUMB_LIMIT` 上限 |
+| `src/ui/imcell.rs` | 图片 cell 的纯绘制：居中、覆盖层、直方图、纹理重建、旋转封装 | 不碰 state，返回数据由调用方写回 |
+| `src/core/image.rs` | 纯像素算法：解码、缩略图（JPEG 降采样）、旋转、直方图、选区统计、EXIF | 无 GUI 类型，可独立单测 |
 
-## 已知边界与代价
+## 核心概念
 
-- `ImageInfo.rgba` 全分辨率常驻内存（选择框统计/旋转需要）。
-- 旋转、直方图重算仍在主线程全图遍历，大图单帧开销存在（加载管线已优化，交互路径未优化）。
-- `available_size()` 为极小值时布局除零风险未防御。
+### 1. Cell（格子）
+
+一切显示内容都是 cell，网格布局（`image_grid`）只认识两类：
+
+```rust
+enum CellKind { Image(usize), Folder(usize) }  // usize = 存储 vec 的下标
+```
+
+- `image_cells` / `folder_cells`：**实际存储**，删除元素下标会移动；
+- `cell_order`：**显示顺序**，与 `pan_offset` 等长同序；
+- **索引约定（不变量）**：三处必须一致——删除/重排时同步维护，否则静默画错图。
+
+### 2. 两种模式（互斥）
+
+文件模式 / 文件夹模式，由状态推导（`folder_cells`、图片、加载批次），入口 `classify_paths` 统一过滤。设计动机：两种模式的交互规则（导航、删除、打开）完全不同，混合会互相干扰。
+
+### 3. 事件门控（对比对规则）
+
+交互响应是"文件夹数 × 各文件夹打开图数"的函数（`state.rs`）：
+
+| 状态 | 导航 Space/B | 删除 Ctrl+RMB |
+|---|---|---|
+| 单文件夹多图 | 不响应 | 响应 |
+| 每文件夹 ≤1 张 | 响应（同步索引） | — |
+| 对比对（2 文件夹各 1 张） | 响应 | **禁用**（Esc 退出） |
+
+### 4. 加载管线
+
+四条独立批次管线（各持 mpsc，互不阻塞）：
+
+| 管线 | 位置 | 载荷 | 特性 |
+|---|---|---|---|
+| standalone 图片 | imlayout | 全图+EXIF+直方图 | 收齐按序 append |
+| 目录扫描 | folder | 路径列表 | 队列接续（`queue_scan`） |
+| 缩略图 | folder | 64px 图 | 每批 8 张、插队+轮转、上限 200 |
+| 打开/导航 | folder | 全图 | OpenEntry/OpenEntries/NavigateMany |
+
+**线程隔离（ADR-0001）**：线程原语只允许出现在 imlayout 与 folder 的加载/扫描方法组；其余模块纯主线程。
+
+### 5. 帧循环顺序（imlayout::ui）
+
+```
+键盘（改 state）→ poll_drops（拖拽）→ poll_loading（standalone）
+→ folder.poll_scan / poll_loading / poll_thumbnails
+→ drain_pending_drops / drain_thumbnails（队列接续）→ 渲染
+```
+
+渲染前所有异步结果已落库；交互反馈（`PanFeedback`）帧末统一应用，避免渲染中途改状态。
+
+## 关键设计决策（ADR）
+
+| 决策 | 内容 | 文件 |
+|---|---|---|
+| 0001 | 单线程心智模型，多线程物理隔离 | decisions/0001 |
+| 0002 | 完全手动坐标布局（不用 egui 自动布局） | decisions/0002 |
+| 0003 | 重 CPU 计算下沉子线程，纹理上传留主线程 | decisions/0003 |
+| 0004 | 前后端分层（core/state/ui） | decisions/0004 |
+| 0005 | 编排层与布局引擎合并为 imlayout | decisions/0005 |
+| 0006 | 文件夹管理拆分独立模块 folder.rs | decisions/0006 |
+
+## 防御性设计（review 沉淀）
+
+- **跨帧引用带 dir 校验**：加载批次目标、缩略图队列都携带目标目录路径，加载完成时比对——文件夹在加载期间被删除/索引移动时，结果丢弃而非写错对象；
+- 空条目、拖拽期间删除等边缘路径有越界防御；
+- egui 0.35 API 坑（`Sense::drag()` 不含 CLICK 等）记录在 [egui-api.md](egui-api.md)。
+
+## 测试策略
+
+- `core`：纯算法测试（缩略图颜色/尺寸/格式回退）；
+- `state`：状态机测试（打开限制、对比对判定、删除恢复、网格边界）——用 headless `egui::Context` 构造纹理；
+- `folder`：调度语义测试（插队、轮转、上限、漂移丢弃）；
+- `imlayout`：模式互斥测试（含窗口期）——用真实临时文件系统。
+- 运行：`cargo test`（25 个）。
+
+## 相关文档
+
+- [文档地图](README.md)
+- [加载管线细节](loading.md) · [布局算法](layout.md) · [文件夹子系统](folder.md) · [局部模式](local-mode.md)
